@@ -1,10 +1,9 @@
+using System.Collections;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
-using System.Windows;
-using System.Windows.Interop;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
 
 namespace ToniaDeskBox.Services;
 
@@ -12,7 +11,75 @@ public static class ShortcutService
 {
     public static void Open(string path)
     {
+        if (!string.Equals(Path.GetExtension(path), ".lnk", StringComparison.OrdinalIgnoreCase))
+        {
+            ShellOpen(path);
+            return;
+        }
+
+        // 手动解析 .lnk 再启动：修正工作目录、过滤宿主环境变量（否则 Electron 应用会静默退出）
+        try
+        {
+            var (target, args, workDir) = ResolveLnk(path);
+            if (string.IsNullOrEmpty(target) || (!File.Exists(target) && !Directory.Exists(target)))
+            {
+                ShellOpen(path);
+                return;
+            }
+
+            var ext = Path.GetExtension(target);
+            if (File.Exists(target) && ext.Equals(".exe", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    StartFiltered(target, args, workDir);
+                    return;
+                }
+                catch (Win32Exception ex) when (ex.NativeErrorCode == 740)
+                {
+                    // 需要提权（UAC），交给 shell 弹 UAC
+                    ShellOpen(path);
+                    return;
+                }
+                catch
+                {
+                    // 启动失败退回 shell 打开整个 .lnk
+                }
+            }
+            ShellOpen(target);
+        }
+        catch
+        {
+            ShellOpen(path);
+        }
+    }
+
+    private static void ShellOpen(string path) =>
         Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+
+    private static void StartFiltered(string target, string args, string workDir)
+    {
+        var psi = new ProcessStartInfo(target)
+        {
+            Arguments = args,
+            UseShellExecute = false,
+            WorkingDirectory = ResolveWorkDir(workDir, target),
+        };
+        foreach (var key in psi.EnvironmentVariables.Keys.Cast<string>().ToList())
+        {
+            if (key.StartsWith("ELECTRON_", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("NODE_OPTIONS", StringComparison.OrdinalIgnoreCase))
+                psi.EnvironmentVariables.Remove(key);
+        }
+        Process.Start(psi);
+    }
+
+    private static string ResolveWorkDir(string workDir, string target)
+    {
+        if (!string.IsNullOrWhiteSpace(workDir) && Directory.Exists(workDir))
+            return workDir;
+        var dir = Path.GetDirectoryName(target);
+        return dir != null && Directory.Exists(dir) ? dir : AppContext.BaseDirectory;
     }
 
     public static void ShowProperties(string path)
@@ -35,15 +102,15 @@ public static class ShortcutService
             Process.Start("explorer.exe", $"/select,\"{path}\"");
     }
 
-    public static string? ResolveTarget(string lnkPath)
+    public static (string Target, string Args, string WorkDir) ResolveLnk(string lnkPath)
     {
         var shellType = Type.GetTypeFromProgID("WScript.Shell");
-        if (shellType == null) return null;
+        if (shellType == null) throw new InvalidOperationException("WScript.Shell 不可用");
         dynamic shell = Activator.CreateInstance(shellType)!;
         try
         {
             dynamic lnk = shell.CreateShortcut(lnkPath);
-            return (string)lnk.TargetPath;
+            return ((string)lnk.TargetPath, (string)lnk.Arguments, (string)lnk.WorkingDirectory);
         }
         finally
         {
@@ -51,46 +118,16 @@ public static class ShortcutService
         }
     }
 
-    public static ImageSource? GetIcon(string path)
+    public static string? ResolveTarget(string lnkPath)
     {
-        var info = new SHFILEINFOW();
-        uint size = (uint)Marshal.SizeOf<SHFILEINFOW>();
-        if (SHGetFileInfo(path, 0, ref info, size, SHGFI_ICON | SHGFI_LARGEICON) == IntPtr.Zero)
-            return null;
         try
         {
-            var bmp = Imaging.CreateBitmapSourceFromHIcon(
-                info.hIcon, Int32Rect.Empty, BitmapSizeOptions.FromEmptyOptions());
-            bmp.Freeze();
-            return bmp;
+            var (target, _, _) = ResolveLnk(lnkPath);
+            return target;
         }
         catch
         {
             return null;
         }
-        finally
-        {
-            DestroyIcon(info.hIcon);
-        }
     }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct SHFILEINFOW
-    {
-        public IntPtr hIcon;
-        public int iIcon;
-        public uint dwAttributes;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
-        public string szDisplayName;
-    }
-
-    private const uint SHGFI_ICON = 0x000000100;
-    private const uint SHGFI_LARGEICON = 0x000000000;
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
-    private static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes,
-        ref SHFILEINFOW psfi, uint cbFileInfo, uint uFlags);
-
-    [DllImport("user32.dll")]
-    private static extern bool DestroyIcon(IntPtr hIcon);
 }

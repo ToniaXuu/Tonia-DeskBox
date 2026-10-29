@@ -8,83 +8,143 @@ public static class SnapService
 {
     private const double Threshold = 12;
 
-    public static void SnapToScreenEdges(Window window)
+    private struct Info
     {
-        if (window.ActualWidth <= 0 || window.ActualHeight <= 0) return;
+        public System.Drawing.Rectangle Wa;
+        public double Dpi;
+    }
+
+    private static bool GetInfo(Window window, out Info info)
+    {
+        info = default;
+        if (window.ActualWidth <= 0 || window.ActualHeight <= 0) return false;
         var hwnd = new WindowInteropHelper(window).Handle;
-        if (hwnd == IntPtr.Zero) return;
+        if (hwnd == IntPtr.Zero) return false;
+        info.Wa = System.Windows.Forms.Screen.FromHandle(hwnd).WorkingArea;
+        info.Dpi = VisualTreeHelper.GetDpi(window).PixelsPerDip;
+        return true;
+    }
 
-        var wa = System.Windows.Forms.Screen.FromHandle(hwnd).WorkingArea;
-        double dpi = VisualTreeHelper.GetDpi(window).PixelsPerDip;
-        double waX = wa.Left / dpi, waY = wa.Top / dpi;
-        double waW = wa.Width / dpi, waH = wa.Height / dpi;
+    // 拖动定位：从期望位置一次性算完 吸附→贴盒→防重叠→钳制，
+    // 与当前有差异才移动窗口一次——避免"期望位置/吸附位置"每帧各写一次造成的抽搐
+    public static bool ApplyDragPosition(Window window, double desiredLeft, double desiredTop, IEnumerable<Window>? others)
+    {
+        if (!GetInfo(window, out var info)) return false;
 
-        double left = window.Left;
-        double right = left + window.ActualWidth;
-        double top = window.Top;
-        double bottom = top + window.ActualHeight;
+        double l = desiredLeft, t = desiredTop;
+        double w = window.ActualWidth, h = window.ActualHeight;
 
-        if (Math.Abs(left - waX) < Threshold)
-            window.Left = waX;
-        else if (Math.Abs(right - (waX + waW)) < Threshold)
-            window.Left = waX + waW - window.ActualWidth;
+        SnapEdges(ref l, ref t, w, h, info);
+        if (others != null)
+        {
+            SnapBoxes(ref l, ref t, w, h, others);
+            ResolveOverlap(ref l, ref t, w, h, others);
+        }
+        Clamp(ref l, ref t, w, h, info);
 
-        if (Math.Abs(top - waY) < Threshold)
-            window.Top = waY;
-        else if (Math.Abs(bottom - (waY + waH)) < Threshold)
-            window.Top = waY + waH - window.ActualHeight;
+        bool changed = Math.Abs(l - window.Left) > 0.1 || Math.Abs(t - window.Top) > 0.1;
+        if (changed)
+        {
+            window.Left = l;
+            window.Top = t;
+        }
+        return changed;
     }
 
     public static void ClampIntoScreen(Window window)
     {
-        var hwnd = new WindowInteropHelper(window).Handle;
-        if (hwnd == IntPtr.Zero) return;
-
-        var wa = System.Windows.Forms.Screen.FromHandle(hwnd).WorkingArea;
-        double dpi = VisualTreeHelper.GetDpi(window).PixelsPerDip;
-
-        window.Left = Math.Clamp(window.Left, wa.Left / dpi, (wa.Right - window.ActualWidth) / dpi);
-        window.Top = Math.Clamp(window.Top, wa.Top / dpi, (wa.Bottom - window.ActualHeight) / dpi);
+        if (!GetInfo(window, out var info)) return;
+        double l = window.Left, t = window.Top;
+        Clamp(ref l, ref t, window.ActualWidth, window.ActualHeight, info);
+        window.Left = l;
+        window.Top = t;
     }
 
-    public static void SnapToBoxes(Window window, IEnumerable<Window> others)
+    // 注意单位：Wa 是物理像素，left/top/w/h 是 DIP，必须先换算再运算
+    private static void SnapEdges(ref double l, ref double t, double w, double h, in Info info)
     {
-        const double t = Threshold;
-        double L = window.Left, T = window.Top;
-        double R = L + window.ActualWidth, B = T + window.ActualHeight;
+        double waX = info.Wa.Left / info.Dpi, waY = info.Wa.Top / info.Dpi;
+        double waW = info.Wa.Width / info.Dpi, waH = info.Wa.Height / info.Dpi;
 
+        if (Math.Abs(l - waX) < Threshold)
+            l = waX;
+        else if (Math.Abs(l + w - (waX + waW)) < Threshold)
+            l = waX + waW - w;
+
+        if (Math.Abs(t - waY) < Threshold)
+            t = waY;
+        else if (Math.Abs(t + h - (waY + waH)) < Threshold)
+            t = waY + waH - h;
+    }
+
+    private static void SnapBoxes(ref double l, ref double t, double w, double h, IEnumerable<Window> others)
+    {
         foreach (var o in others)
         {
             if (o.ActualWidth <= 0 || o.ActualHeight <= 0) continue;
             double oL = o.Left, oT = o.Top;
             double oR = oL + o.ActualWidth, oB = oT + o.ActualHeight;
+            double R = l + w, B = t + h;
 
             bool hSnapped = false;
-            if (Math.Abs(R - oL) < t) { window.Left = oL - window.ActualWidth; hSnapped = true; }
-            else if (Math.Abs(L - oR) < t) { window.Left = oR; hSnapped = true; }
-            else if (Math.Abs(L - oL) < t) { window.Left = oL; hSnapped = true; }
-            else if (Math.Abs(R - oR) < t) { window.Left = oR - window.ActualWidth; hSnapped = true; }
+            if (Math.Abs(R - oL) < Threshold) { l = oL - w; hSnapped = true; }
+            else if (Math.Abs(l - oR) < Threshold) { l = oR; hSnapped = true; }
+            else if (Math.Abs(l - oL) < Threshold) { l = oL; hSnapped = true; }
+            else if (Math.Abs(R - oR) < Threshold) { l = oR - w; hSnapped = true; }
 
             // 横排时水平对齐：水平方向已贴靠或重叠，且顶边足够接近
-            double nL = window.Left, nR = nL + window.ActualWidth;
+            double nL = l, nR = nL + w;
             bool hOverlap = nR > oL + 1 && nL < oR - 1;
-            if ((hSnapped || hOverlap) && Math.Abs(T - oT) < t)
-                window.Top = oT;
+            if ((hSnapped || hOverlap) && Math.Abs(t - oT) < Threshold)
+                t = oT;
 
             bool vSnapped = false;
-            if (Math.Abs(B - oT) < t) { window.Top = oT - window.ActualHeight; vSnapped = true; }
-            else if (Math.Abs(T - oB) < t) { window.Top = oB; vSnapped = true; }
-            else if (Math.Abs(T - oT) < t) { window.Top = oT; vSnapped = true; }
-            else if (Math.Abs(B - oB) < t) { window.Top = oB - window.ActualHeight; vSnapped = true; }
+            if (Math.Abs(B - oT) < Threshold) { t = oT - h; vSnapped = true; }
+            else if (Math.Abs(t - oB) < Threshold) { t = oB; vSnapped = true; }
+            else if (Math.Abs(t - oT) < Threshold) { t = oT; vSnapped = true; }
+            else if (Math.Abs(B - oB) < Threshold) { t = oB - h; vSnapped = true; }
 
             // 竖排时垂直对齐：垂直方向已贴靠或重叠，且左边足够接近
-            double nT = window.Top, nB = nT + window.ActualHeight;
+            double nT = t, nB = nT + h;
             bool vOverlap = nB > oT + 1 && nT < oB - 1;
-            if ((vSnapped || vOverlap) && Math.Abs(L - oL) < t)
-                window.Left = oL;
-
-            L = window.Left; T = window.Top;
-            R = L + window.ActualWidth; B = T + window.ActualHeight;
+            if ((vSnapped || vOverlap) && Math.Abs(l - oL) < Threshold)
+                l = oL;
         }
+    }
+
+    // 防重叠：与其它盒子相交时沿最小穿透轴推出（拖动中与松手后都调用）
+    private static void ResolveOverlap(ref double l, ref double t, double w, double h, IEnumerable<Window> others)
+    {
+        for (int iter = 0; iter < 3; iter++)
+        {
+            bool moved = false;
+            foreach (var o in others)
+            {
+                if (o.ActualWidth <= 0 || o.ActualHeight <= 0) continue;
+                double oL = o.Left, oT = o.Top;
+                double oW = o.ActualWidth, oH = o.ActualHeight;
+
+                double ix = Math.Min(l + w, oL + oW) - Math.Max(l, oL);
+                double iy = Math.Min(t + h, oT + oH) - Math.Max(t, oT);
+                if (ix <= 0 || iy <= 0) continue;
+
+                if (ix < iy)
+                    l = l + w / 2 < oL + oW / 2 ? oL - w : oL + oW;
+                else
+                    t = t + h / 2 < oT + oH / 2 ? oT - h : oT + oH;
+                moved = true;
+            }
+            if (!moved) break;
+        }
+    }
+
+    private static void Clamp(ref double l, ref double t, double w, double h, in Info info)
+    {
+        double waX = info.Wa.Left / info.Dpi, waY = info.Wa.Top / info.Dpi;
+        double waR = info.Wa.Right / info.Dpi, waB = info.Wa.Bottom / info.Dpi;
+
+        // 窗口比工作区还大时上限会小于下限，Math.Clamp 会抛异常，这里退化为贴边
+        l = waR - w < waX ? waX : Math.Clamp(l, waX, waR - w);
+        t = waB - h < waY ? waY : Math.Clamp(t, waY, waB - h);
     }
 }

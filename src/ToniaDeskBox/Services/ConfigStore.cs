@@ -20,19 +20,58 @@ public class ConfigStore
 
     public ConfigStore(string? dataDir = null)
     {
-        DataDir = dataDir ?? Path.Combine(AppContext.BaseDirectory, "boxes");
+        DataDir = dataDir ?? ResolveDataDir();
         Directory.CreateDirectory(DataDir);
+    }
+
+    private static string ResolveDataDir()
+    {
+        var exeDir = AppContext.BaseDirectory;
+        if (CanWrite(exeDir))
+            return Path.Combine(exeDir, "boxes");
+
+        // 放在只读位置（如 Program Files）时退回用户目录，避免数据写不进去
+        var fallback = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Tonia-DeskBox", "boxes");
+        Directory.CreateDirectory(fallback);
+        return fallback;
+    }
+
+    private static bool CanWrite(string dir)
+    {
+        try
+        {
+            var probe = Path.Combine(dir, ".tonia-write-test");
+            File.WriteAllText(probe, "1");
+            File.Delete(probe);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public AppConfig Load()
     {
         var cfg = TryRead(ConfigPath) ?? TryRead(BakPath);
-        if (cfg != null) return cfg;
+        if (cfg == null)
+        {
+            cfg = new AppConfig();
+            cfg.Boxes.Add(new BoxConfig());
+            Save(cfg);
+        }
 
-        var def = new AppConfig();
-        def.Boxes.Add(new BoxConfig());
-        Save(def);
-        return def;
+        // 一次性迁移：早期版本盒子默认置顶，会盖住所有窗口，统一改回桌面组件语义
+        if (!cfg.Settings.TopmostMigrated)
+        {
+            foreach (var b in cfg.Boxes) b.Topmost = false;
+            cfg.Settings.TopmostMigrated = true;
+            Save(cfg);
+        }
+
+        return cfg;
     }
 
     private static AppConfig? TryRead(string path)

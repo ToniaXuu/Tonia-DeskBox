@@ -10,6 +10,7 @@
     <RootNamespace>ToniaDeskBox</RootNamespace>
     <AssemblyName>ToniaDeskBox</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>app.ico</ApplicationIcon>
     <Version>0.1.0</Version>
     <Product>Tonia-DeskBox</Product>
     <Company>Tonia</Company>
@@ -20,6 +21,10 @@
     <!-- 移除 UseWindowsForms 注入的隐式全局 using，避免与 WPF 类型冲突；需要处用 WF 别名 -->
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="app.ico" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">

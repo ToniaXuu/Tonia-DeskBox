@@ -11,37 +11,129 @@
         SizeToContent="WidthAndHeight"
         SourceInitialized="OnSourceInitialized">
     <Border x:Name="RootBorder"
-            Background="#1F2A30"
-            CornerRadius="8"
-            Padding="16,9"
-            BorderThickness="2"
-            BorderBrush="Transparent"
+            Background="#E6222A38"
+            CornerRadius="12"
+            Padding="14,10"
+            BorderThickness="1"
+            BorderBrush="#26FFFFFF"
             AllowDrop="True"
             Drop="OnDrop"
             DragEnter="OnDragEnter"
             DragLeave="OnDragLeave"
             MouseLeftButtonDown="OnBoxMouseLeftButtonDown"
+            MouseLeftButtonUp="OnBoxMouseLeftButtonUp"
             MouseRightButtonDown="OnBoxMouseRightButtonDown"
             Cursor="Hand">
-        <StackPanel Orientation="Horizontal">
-            <TextBlock x:Name="NameText"
-                       Foreground="#DDFFFFFF"
-                       FontSize="13"
-                       VerticalAlignment="Center"/>
-            <Border x:Name="BadgeBorder"
-                    Background="#E0607488"
-                    CornerRadius="9"
-                    MinWidth="18"
-                    Height="18"
-                    Margin="9,0,0,0"
-                    Padding="5,0"
-                    VerticalAlignment="Center">
-                <TextBlock x:Name="CountText"
-                           Foreground="White"
-                           FontSize="11"
-                           HorizontalAlignment="Center"
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <StackPanel Grid.Row="0" Orientation="Horizontal">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock x:Name="NameText"
+                           Foreground="#F2FFFFFF"
+                           FontSize="13"
+                           FontWeight="SemiBold"
                            VerticalAlignment="Center"/>
+                <Border x:Name="BadgeBorder"
+                        Background="#E06E8BFF"
+                        CornerRadius="10"
+                        MinWidth="20"
+                        Height="20"
+                        Margin="9,0,0,0"
+                        Padding="6,0"
+                        VerticalAlignment="Center">
+                    <TextBlock x:Name="CountText"
+                               Foreground="White"
+                               FontSize="11"
+                               FontWeight="SemiBold"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center"/>
+                </Border>
+            </StackPanel>
+
+            <!-- 内嵌内容网格：固定宽度 >= 240 时显示 -->
+            <Border Grid.Row="1" x:Name="GridHost"
+                    Visibility="Collapsed"
+                    Margin="0,10,0,0">
+                <Grid>
+                    <TextBlock x:Name="InlineEmptyHint"
+                               Text="把桌面图标拖进来收纳"
+                               Foreground="#80FFFFFF"
+                               FontSize="12"
+                               Margin="4,6,0,2"
+                               HorizontalAlignment="Left"/>
+                    <ScrollViewer MaxHeight="320" MaxWidth="560"
+                                  VerticalScrollBarVisibility="Auto">
+                        <ItemsControl x:Name="InlineItems">
+                            <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                    <WrapPanel Orientation="Horizontal"/>
+                                </ItemsPanelTemplate>
+                            </ItemsControl.ItemsPanel>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Width="74" Height="86" Margin="2"
+                                          Background="Transparent"
+                                          Cursor="Hand"
+                                          MouseLeftButtonDown="OnInlineItemDown"
+                                          MouseMove="OnInlineItemMove"
+                                          MouseLeftButtonUp="OnInlineItemUp"
+                                          MouseRightButtonDown="OnInlineItemRightDown">
+                                        <Border x:Name="HoverBg"
+                                                CornerRadius="8"
+                                                Background="Transparent"/>
+                                        <StackPanel VerticalAlignment="Center">
+                                            <Image Source="{Binding Icon}"
+                                                   Width="38" Height="38"
+                                                   VerticalAlignment="Center"
+                                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                                            <TextBlock Text="{Binding DisplayName}"
+                                                       Foreground="#EEFFFFFF"
+                                                       FontSize="11"
+                                                       TextWrapping="Wrap"
+                                                       TextAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis"
+                                                       MaxHeight="30"
+                                                       Margin="0,4,0,0"
+                                                       VerticalAlignment="Top"
+                                                       ToolTip="{Binding DisplayName}"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <DataTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="HoverBg" Property="Background" Value="#14FFFFFF"/>
+                                        </Trigger>
+                                    </DataTemplate.Triggers>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Grid>
             </Border>
         </StackPanel>
+
+        <!-- 右下角调整大小手柄 -->
+        <Thumb Grid.Row="1" x:Name="ResizeGrip"
+               Width="16" Height="16"
+               HorizontalAlignment="Right" VerticalAlignment="Bottom"
+               Margin="0,0,-2,-2"
+               Cursor="SizeNWSE"
+               Visibility="Collapsed"
+               DragStarted="OnResizeStarted"
+               DragDelta="OnResizeDrag"
+               DragCompleted="OnResizeDone">
+            <Thumb.Template>
+                <ControlTemplate TargetType="Thumb">
+                    <Grid Background="Transparent">
+                        <Path Data="M 10,14 L 14,10 M 10,10 L 14,6 M 10,6 L 14,2"
+                              Stroke="#66FFFFFF" StrokeThickness="1.4"
+                              HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
+                    </Grid>
+                </ControlTemplate>
+            </Thumb.Template>
+        </Thumb>
+        </Grid>
     </Border>
 </Window>

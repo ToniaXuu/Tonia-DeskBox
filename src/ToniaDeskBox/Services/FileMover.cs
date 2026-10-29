@@ -1,4 +1,5 @@
 using System.IO;
+using System.Runtime.InteropServices;
 using ToniaDeskBox.Models;
 
 namespace ToniaDeskBox.Services;
@@ -14,6 +15,7 @@ public static class FileMover
             try
             {
                 Directory.Move(src, target);
+                NotifyShellDeleted(src);
                 return;
             }
             catch (IOException) when (!string.Equals(Path.GetPathRoot(src), Path.GetPathRoot(target), StringComparison.OrdinalIgnoreCase))
@@ -22,10 +24,12 @@ public static class FileMover
             }
             CopyDirectory(src, target);
             Directory.Delete(src, true);
+            NotifyShellDeleted(src);
         }
         else
         {
             File.Move(src, target);
+            NotifyShellDeleted(src);
         }
     }
 
@@ -62,6 +66,28 @@ public static class FileMover
                 skipped.Add(name);
             }
         }
+        if (moved.Count > 0) NotifyShellDirChanged(desktop);
         return moved;
+    }
+
+    private const int SHCNE_DELETE = 0x00000004;
+    private const int SHCNE_UPDATEDIR = 0x00001000;
+    private const uint SHCNF_PATHW = 0x0005;
+
+    [DllImport("shell32.dll")]
+    private static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+    public static void NotifyShellDeleted(string path)
+    {
+        var ptr = Marshal.StringToHGlobalUni(path);
+        try { SHChangeNotify(SHCNE_DELETE, SHCNF_PATHW, ptr, IntPtr.Zero); }
+        finally { Marshal.FreeHGlobal(ptr); }
+    }
+
+    public static void NotifyShellDirChanged(string dir)
+    {
+        var ptr = Marshal.StringToHGlobalUni(dir);
+        try { SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATHW, ptr, IntPtr.Zero); }
+        finally { Marshal.FreeHGlobal(ptr); }
     }
 }

@@ -19,6 +19,7 @@ public partial class BoxSettingsWindow : Window
     private readonly BoxConfig _box;
     private readonly AppConfig _config;
     private readonly ConfigStore _store;
+    private readonly List<(Button Btn, string Hex)> _swatches = new();
     private string _selectedColor;
 
     public bool Applied { get; private set; }
@@ -34,6 +35,8 @@ public partial class BoxSettingsWindow : Window
 
         NameBox.Text = box.Name;
         OpacitySlider.Value = Math.Clamp(box.Opacity * 100, 0, 100);
+        WidthSlider.Value = box.W;
+        HeightSlider.Value = box.H;
         RoundedCheck.IsChecked = box.Rounded;
         RadiusSlider.Value = box.CornerSize;
         AcrylicCheck.IsChecked = box.Acrylic;
@@ -41,7 +44,43 @@ public partial class BoxSettingsWindow : Window
         TopmostCheck.IsChecked = box.Topmost;
 
         BuildSwatches();
+        SyncValueBoxes();
         UpdatePreview();
+    }
+
+    // ---------- 数值输入框 ↔ 滑杆 ----------
+
+    private void SyncValueBoxes()
+    {
+        OpacityBox.Text = $"{Math.Round(OpacitySlider.Value):0}";
+        WidthBox.Text = $"{Math.Round(WidthSlider.Value):0}";
+        HeightBox.Text = $"{Math.Round(HeightSlider.Value):0}";
+        RadiusBox.Text = $"{Math.Round(RadiusSlider.Value):0}";
+    }
+
+    private void OnValueBoxKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (e.Key != System.Windows.Input.Key.Enter) return;
+        CommitValueBox((TextBox)sender);
+        e.Handled = true;
+    }
+
+    private void OnValueBoxLostFocus(object sender, RoutedEventArgs e) =>
+        CommitValueBox((TextBox)sender);
+
+    private void CommitValueBox(TextBox box)
+    {
+        var slider = box == OpacityBox ? OpacitySlider
+            : box == WidthBox ? WidthSlider
+            : box == HeightBox ? HeightSlider
+            : RadiusSlider;
+
+        if (!double.TryParse(box.Text.Trim(), out var v))
+        {
+            SyncValueBoxes();
+            return;
+        }
+        slider.Value = Math.Clamp(Math.Round(v), slider.Minimum, slider.Maximum);
     }
 
     private void BuildSwatches()
@@ -55,15 +94,35 @@ public partial class BoxSettingsWindow : Window
                 Margin = new Thickness(0, 0, 6, 6),
                 Tag = hex,
                 Background = MakeBrush(hex),
+                Style = (Style)FindResource("SwatchButton"),
             };
             btn.Click += (_, _) =>
             {
                 _selectedColor = (string)btn.Tag;
                 UpdatePreview();
             };
+            _swatches.Add((btn, hex));
             SwatchPanel.Children.Add(btn);
         }
     }
+
+    private void UpdateSwatchSelection()
+    {
+        foreach (var (btn, hex) in _swatches)
+        {
+            bool on = string.Equals(hex, _selectedColor, StringComparison.OrdinalIgnoreCase);
+            btn.BorderBrush = on ? Brushes.White : new SolidColorBrush(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
+            btn.BorderThickness = new Thickness(on ? 2 : 1);
+        }
+    }
+
+    private void OnTitleBarMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (e.ClickCount == 1 && e.ChangedButton == System.Windows.Input.MouseButton.Left)
+            DragMove();
+    }
+
+    private void OnClose(object sender, RoutedEventArgs e) => Close();
 
     private void OnPickWallpaper(object sender, RoutedEventArgs e)
     {
@@ -80,13 +139,59 @@ public partial class BoxSettingsWindow : Window
 
     private void OnPreviewChanged(object sender, RoutedEventArgs e) => UpdatePreview();
 
+    private void OnCopyFromBox(object sender, RoutedEventArgs e)
+    {
+        var others = _config.Boxes.Where(b => !ReferenceEquals(b, _box)).ToList();
+        if (others.Count == 0)
+        {
+            MessageBox.Show(this, "当前没有其他盒子。", "Tonia-DeskBox",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var menu = new ContextMenu();
+        foreach (var src in others)
+        {
+            var mi = new MenuItem { Header = src.Name };
+            mi.Click += (_, _) => CopyFrom(src);
+            menu.Items.Add(mi);
+        }
+        menu.PlacementTarget = (UIElement)sender;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    private void CopyFrom(BoxConfig src)
+    {
+        OpacitySlider.Value = Math.Clamp(src.Opacity * 100, 0, 100);
+        _selectedColor = src.BackColor;
+        RoundedCheck.IsChecked = src.Rounded;
+        RadiusSlider.Value = src.CornerSize;
+        AcrylicCheck.IsChecked = src.Acrylic && DwmHelper.IsAcrylicSupported();
+        TopmostCheck.IsChecked = src.Topmost;
+        WidthSlider.Value = Math.Clamp(Math.Round(src.W / 10) * 10, 0, 560);
+        HeightSlider.Value = Math.Clamp(Math.Round(src.H / 10) * 10, 0, 460);
+        SyncValueBoxes();
+        UpdatePreview();
+    }
+
+    private void OnSizeSliderChanged(object sender, RoutedEventArgs e)
+    {
+        double w = WidthSlider.Value;
+        WidthText.Text = w == 0 ? "自适应" : w < 240 ? "紧凑" : "";
+        double h = HeightSlider.Value;
+        HeightText.Text = h == 0 ? "自适应" : "";
+        SyncValueBoxes();
+    }
+
     private void UpdatePreview()
     {
         PreviewBorder.Background = MakeBrush(_selectedColor);
         PreviewBorder.Opacity = Math.Max(OpacitySlider.Value / 100.0, 0.15);
         var radius = RoundedCheck.IsChecked == true ? RadiusSlider.Value : 0;
         PreviewBorder.CornerRadius = new CornerRadius(radius);
-        OpacityText.Text = $"{OpacitySlider.Value:0}%";
+        UpdateSwatchSelection();
+        SyncValueBoxes();
     }
 
     private static Brush MakeBrush(string hex)
@@ -156,6 +261,8 @@ public partial class BoxSettingsWindow : Window
 
         _box.Opacity = OpacitySlider.Value / 100.0;
         _box.BackColor = _selectedColor;
+        _box.W = WidthSlider.Value;
+        _box.H = HeightSlider.Value;
         _box.Rounded = RoundedCheck.IsChecked == true;
         _box.CornerSize = RadiusSlider.Value;
         AcrylicWanted = AcrylicCheck.IsChecked == true;
