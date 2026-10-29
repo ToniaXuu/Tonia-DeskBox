@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using ToniaDeskBox.Models;
 using ToniaDeskBox.Services;
@@ -19,17 +20,24 @@ public partial class BoxWindow : Window
     private readonly AppConfig _config;
     private readonly ConfigStore _store;
     private readonly Brush _baseBorderBrush;
+    private readonly bool _acrylic;
     private PanelWindow? _panel;
     private bool _dragging;
+
+    public bool AcrylicActive => _acrylic;
 
     public event Action<BoxConfig>? BoxDeleted;
 
     public BoxWindow(BoxConfig box, AppConfig config, ConfigStore store)
     {
-        InitializeComponent();
         Box = box;
         _config = config;
         _store = store;
+        _acrylic = box.Acrylic && DwmHelper.IsAcrylicSupported();
+
+        // AllowsTransparency 与 DWM system backdrop 互斥，按模式在显示前决定
+        AllowsTransparency = !_acrylic;
+        InitializeComponent();
 
         Left = box.X;
         Top = box.Y;
@@ -42,11 +50,35 @@ public partial class BoxWindow : Window
         _baseBorderBrush = RootBorder.BorderBrush;
     }
 
+    private void OnSourceInitialized(object? sender, EventArgs e)
+    {
+        if (!_acrylic) return;
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (HwndSource.FromHwnd(hwnd) is HwndSource source && source.CompositionTarget != null)
+            source.CompositionTarget.BackgroundColor = Colors.Transparent;
+        DwmHelper.ApplyAcrylic(hwnd, Box.Rounded);
+    }
+
     private void ApplyAppearance()
     {
-        RootBorder.Background = ParseBrush(Box.BackColor);
-        RootBorder.CornerRadius = Box.Rounded ? new CornerRadius(8) : new CornerRadius(0);
-        Opacity = Box.Opacity;
+        var color = ParseColor(Box.BackColor);
+        if (_acrylic)
+        {
+            // 毛玻璃模式：底色作为亚克力上的半透明叠层，透明度映射到底色 alpha
+            var a = (byte)Math.Clamp(Box.Opacity * 140, 20, 180);
+            var b = new SolidColorBrush(Color.FromArgb(a, color.R, color.G, color.B));
+            b.Freeze();
+            RootBorder.Background = b;
+            Opacity = 1.0;
+        }
+        else
+        {
+            var b = new SolidColorBrush(color);
+            b.Freeze();
+            RootBorder.Background = b;
+            Opacity = Box.Opacity;
+        }
+        RootBorder.CornerRadius = Box.Rounded ? new CornerRadius(Box.CornerSize) : new CornerRadius(0);
         Topmost = Box.Topmost;
         NameText.Text = Box.Name;
     }
@@ -68,9 +100,14 @@ public partial class BoxWindow : Window
         }
     }
 
+    private static Color ParseColor(string hex) => ((SolidColorBrush)ParseBrush(hex)).Color;
+
     private void OnLocationChanged(object? sender, EventArgs e)
     {
-        if (_dragging) SnapService.SnapToScreenEdges(this);
+        if (!_dragging) return;
+        SnapService.SnapToScreenEdges(this);
+        if (Application.Current is App app)
+            SnapService.SnapToBoxes(this, app.BoxWindows.Where(w => !ReferenceEquals(w, this)));
     }
 
     private void OnBoxMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -108,6 +145,10 @@ public partial class BoxWindow : Window
     {
         var menu = new ContextMenu();
 
+        var miSettings = new MenuItem { Header = "盒子设置…" };
+        miSettings.Click += (_, _) => OpenSettings();
+        menu.Items.Add(miSettings);
+
         var miData = new MenuItem { Header = "打开数据目录" };
         miData.Click += (_, _) => Process.Start("explorer.exe", _store.BoxDir(Box));
         menu.Items.Add(miData);
@@ -120,6 +161,39 @@ public partial class BoxWindow : Window
         menu.Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint;
         menu.IsOpen = true;
         e.Handled = true;
+    }
+
+    private void OpenSettings()
+    {
+        var dlg = new BoxSettingsWindow(Box, _config, _store) { Owner = this };
+        dlg.ShowDialog();
+        if (!dlg.Applied) return;
+
+        _store.Save(_config);
+        if (dlg.AcrylicWanted != AcrylicActive)
+            ((App)Application.Current).RecreateBox(Box);
+        else
+            ApplySettings();
+    }
+
+    public void ApplySettings()
+    {
+        ApplyAppearance();
+        RefreshBadge();
+        _panel?.RefreshItems();
+    }
+
+    public void SetVisible(bool visible)
+    {
+        if (visible)
+        {
+            Show();
+        }
+        else
+        {
+            _panel?.Hide();
+            Hide();
+        }
     }
 
     private void DeleteBox()

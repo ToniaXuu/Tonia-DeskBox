@@ -8,7 +8,8 @@
         ShowInTaskbar="False"
         ShowActivated="False"
         ResizeMode="NoResize"
-        SizeToContent="WidthAndHeight">
+        SizeToContent="WidthAndHeight"
+        SourceInitialized="OnSourceInitialized">
     <Border x:Name="RootBorder"
             Background="#1F2A30"
             CornerRadius="8"

@@ -22,6 +22,7 @@ public class BoxConfig
     public string BackColor { get; set; } = "#1F2A30";
     public bool Acrylic { get; set; }
     public bool Rounded { get; set; } = true;
+    public double CornerSize { get; set; } = 8;
     public bool Topmost { get; set; }
 
     public List<string> Order { get; set; } = new();
