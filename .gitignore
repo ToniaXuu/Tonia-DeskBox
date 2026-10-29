@@ -1,0 +1,16 @@
+# Build artifacts
+bin/
+obj/
+publish/
+
+# IDE
+.vs/
+.idea/
+*.user
+
+# Runtime data (收纳的文件与配置，不进版本库)
+boxes/
+
+# OS
+Thumbs.db
+Desktop.ini
