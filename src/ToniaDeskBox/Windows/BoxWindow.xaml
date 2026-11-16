@@ -1,3 +1,5 @@
+<!-- 盒子是分层窗口（AllowsTransparency=True）：底色为半透明纯色，不做 DWM 亚克力。
+     Theme.* 笔刷由 BoxWindow 挂到窗口资源并由 AppearanceTheme 统一更新。 -->
 <Window x:Class="ToniaDeskBox.Windows.BoxWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
@@ -11,11 +13,11 @@
         SizeToContent="WidthAndHeight"
         SourceInitialized="OnSourceInitialized">
     <Border x:Name="RootBorder"
-            Background="#E6222A38"
+            Background="{DynamicResource Theme.Surface}"
+            BorderBrush="{DynamicResource Theme.Border}"
             CornerRadius="12"
             Padding="14,10"
             BorderThickness="1"
-            BorderBrush="#26FFFFFF"
             AllowDrop="True"
             Drop="OnDrop"
             DragEnter="OnDragEnter"
@@ -27,95 +29,125 @@
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
             <StackPanel Grid.Row="0" Orientation="Horizontal">
             <StackPanel Orientation="Horizontal">
+                <Ellipse x:Name="AccentDot" Width="6" Height="6"
+                         Margin="0,0,8,0" VerticalAlignment="Center"
+                         Fill="{DynamicResource Theme.Accent}"/>
                 <TextBlock x:Name="NameText"
-                           Foreground="#F2FFFFFF"
+                           Foreground="{DynamicResource Theme.Text}"
                            FontSize="13"
                            FontWeight="SemiBold"
                            VerticalAlignment="Center"/>
                 <Border x:Name="BadgeBorder"
-                        Background="#E06E8BFF"
-                        CornerRadius="10"
-                        MinWidth="20"
-                        Height="20"
+                        Background="{DynamicResource Theme.AccentBadge}"
+                        CornerRadius="9"
+                        MinWidth="22"
+                        Height="18"
                         Margin="9,0,0,0"
-                        Padding="6,0"
+                        Padding="7,0"
                         VerticalAlignment="Center">
                     <TextBlock x:Name="CountText"
-                               Foreground="White"
+                               Foreground="{DynamicResource Theme.OnAccent}"
                                FontSize="11"
                                FontWeight="SemiBold"
                                HorizontalAlignment="Center"
                                VerticalAlignment="Center"/>
                 </Border>
             </StackPanel>
+            </StackPanel>
 
-            <!-- 内嵌内容网格：固定宽度 >= 240 时显示 -->
-            <Border Grid.Row="1" x:Name="GridHost"
-                    Visibility="Collapsed"
-                    Margin="0,10,0,0">
-                <Grid>
-                    <TextBlock x:Name="InlineEmptyHint"
-                               Text="把桌面图标拖进来收纳"
-                               Foreground="#80FFFFFF"
-                               FontSize="12"
-                               Margin="4,6,0,2"
-                               HorizontalAlignment="Left"/>
-                    <ScrollViewer MaxHeight="320" MaxWidth="560"
-                                  VerticalScrollBarVisibility="Auto">
-                        <ItemsControl x:Name="InlineItems">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <WrapPanel Orientation="Horizontal"/>
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Grid Width="74" Height="86" Margin="2"
-                                          Background="Transparent"
-                                          Cursor="Hand"
-                                          MouseLeftButtonDown="OnInlineItemDown"
-                                          MouseMove="OnInlineItemMove"
-                                          MouseLeftButtonUp="OnInlineItemUp"
-                                          MouseRightButtonDown="OnInlineItemRightDown">
-                                        <Border x:Name="HoverBg"
-                                                CornerRadius="8"
-                                                Background="Transparent"/>
-                                        <StackPanel VerticalAlignment="Center">
-                                            <Image Source="{Binding Icon}"
-                                                   Width="38" Height="38"
-                                                   VerticalAlignment="Center"
-                                                   RenderOptions.BitmapScalingMode="HighQuality"/>
-                                            <TextBlock Text="{Binding DisplayName}"
-                                                       Foreground="#EEFFFFFF"
-                                                       FontSize="11"
-                                                       TextWrapping="Wrap"
-                                                       TextAlignment="Center"
-                                                       TextTrimming="CharacterEllipsis"
-                                                       MaxHeight="30"
-                                                       Margin="0,4,0,0"
-                                                       VerticalAlignment="Top"
-                                                       ToolTip="{Binding DisplayName}"/>
-                                        </StackPanel>
-                                    </Grid>
-                                    <DataTemplate.Triggers>
-                                        <Trigger Property="IsMouseOver" Value="True">
-                                            <Setter TargetName="HoverBg" Property="Background" Value="#14FFFFFF"/>
-                                        </Trigger>
-                                    </DataTemplate.Triggers>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </ScrollViewer>
-                </Grid>
-            </Border>
+        <!-- 内嵌内容网格：固定宽度 >= 240 时显示 -->
+        <Border Grid.Row="2" x:Name="GridHost"
+                Visibility="Collapsed"
+                Margin="0,10,0,0">
+            <Grid>
+                <TextBlock x:Name="InlineEmptyHint"
+                           Text="把桌面图标拖进来收纳"
+                           Foreground="{DynamicResource Theme.TextMuted}"
+                           FontSize="12"
+                           Margin="4,6,0,2"
+                           HorizontalAlignment="Left"/>
+                <ScrollViewer MaxHeight="320" MaxWidth="560"
+                              VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="InlineItems">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Width="74" Height="86" Margin="2"
+                                      Background="Transparent"
+                                      Cursor="Hand"
+                                      MouseLeftButtonDown="OnInlineItemDown"
+                                      MouseMove="OnInlineItemMove"
+                                      MouseLeftButtonUp="OnInlineItemUp"
+                                      MouseRightButtonDown="OnInlineItemRightDown">
+                                    <Border x:Name="HoverBg"
+                                            CornerRadius="8"
+                                            Background="Transparent"/>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <Image Source="{Binding Icon}"
+                                               Width="38" Height="38"
+                                               VerticalAlignment="Center"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   Foreground="{DynamicResource Theme.Text}"
+                                                   FontSize="11"
+                                                   TextWrapping="Wrap"
+                                                   TextAlignment="Center"
+                                                   MaxHeight="30"
+                                                   Margin="0,4,0,0"
+                                                   VerticalAlignment="Top"
+                                                   ToolTip="{Binding DisplayName}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <DataTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="HoverBg" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
+                                    </Trigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+
+        <!-- 折叠态内容预览：空盒给拖放引导，有内容显示前 3 个文件图标 -->
+        <StackPanel x:Name="PreviewRow" Grid.Row="1" Orientation="Horizontal"
+                    Margin="0,9,0,0" Visibility="Collapsed"
+                    IsHitTestVisible="False">
+            <TextBlock x:Name="PreviewEmptyHint" Text="拖放文件到这里"
+                       Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
+                       VerticalAlignment="Center" Visibility="Collapsed"/>
+            <ItemsControl x:Name="PreviewIcons" Visibility="Collapsed">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate>
+                        <Border Width="20" Height="20" Margin="0,0,4,0"
+                                Background="{DynamicResource Theme.Fill}" CornerRadius="4">
+                            <Image Source="{Binding Icon}" Width="16" Height="16"
+                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+            <TextBlock x:Name="PreviewMore" Foreground="{DynamicResource Theme.TextSecondary}" FontSize="11"
+                       Margin="4,0,0,0" VerticalAlignment="Center"/>
         </StackPanel>
 
         <!-- 右下角调整大小手柄 -->
-        <Thumb Grid.Row="1" x:Name="ResizeGrip"
+        <Thumb Grid.Row="2" x:Name="ResizeGrip"
                Width="16" Height="16"
                HorizontalAlignment="Right" VerticalAlignment="Bottom"
                Margin="0,0,-2,-2"
@@ -128,12 +160,22 @@
                 <ControlTemplate TargetType="Thumb">
                     <Grid Background="Transparent">
                         <Path Data="M 10,14 L 14,10 M 10,10 L 14,6 M 10,6 L 14,2"
-                              Stroke="#66FFFFFF" StrokeThickness="1.4"
+                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.4"
                               HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
                     </Grid>
                 </ControlTemplate>
             </Thumb.Template>
         </Thumb>
+
+        <!-- 质感层：顶部分类色条 + 底部内暗线，纯装饰不参与命中测试 -->
+        <Rectangle x:Name="AccentBar" Grid.RowSpan="3" Height="2"
+                   VerticalAlignment="Top" Margin="-6,-9,-6,0"
+                   RadiusX="1" RadiusY="1"
+                   Fill="{DynamicResource Theme.Accent}"
+                   IsHitTestVisible="False"/>
+        <Rectangle x:Name="BottomShade" Grid.RowSpan="3" Height="1"
+                   VerticalAlignment="Bottom" Margin="-6,0,-6,-9"
+                   Fill="{DynamicResource Theme.Divider}" IsHitTestVisible="False"/>
         </Grid>
     </Border>
 </Window>

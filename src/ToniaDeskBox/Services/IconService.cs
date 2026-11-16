@@ -159,6 +159,8 @@ public static class IconService
         public uint dwAttributes;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
         public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 80)]
+        public string szTypeName;
     }
 
     private const uint SHGFI_ICON = 0x000000100;

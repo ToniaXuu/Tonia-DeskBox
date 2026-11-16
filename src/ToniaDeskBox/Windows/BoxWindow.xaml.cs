@@ -26,9 +26,9 @@ public partial class BoxWindow : Window
 
     private readonly AppConfig _config;
     private readonly ConfigStore _store;
-    private readonly Brush _baseBorderBrush;
-    private readonly Brush _hoverBorderBrush;
-    private readonly bool _acrylic;
+    // 全窗口共用的主题笔刷；Update() 会原地改 Color，已引用的笔刷同步刷新
+    private readonly AppearanceTheme _theme;
+    private bool _dropActive;
     private PanelWindow? _panel;
     private bool _dragging;
     private System.Windows.Vector _grabOffset;
@@ -45,8 +45,6 @@ public partial class BoxWindow : Window
     private double _resizeStartH;
     private bool _resizeHeightFixed;
 
-    public bool AcrylicActive => _acrylic;
-
     public event Action<BoxConfig>? BoxDeleted;
 
     public BoxWindow(BoxConfig box, AppConfig config, ConfigStore store)
@@ -54,19 +52,19 @@ public partial class BoxWindow : Window
         Box = box;
         _config = config;
         _store = store;
-        _acrylic = box.Acrylic && DwmHelper.IsAcrylicSupported();
 
-        // AllowsTransparency 与 DWM system backdrop 互斥，按模式在显示前决定
-        AllowsTransparency = !_acrylic;
         InitializeComponent();
+        // XAML 里已声明 AllowsTransparency=True：底色是半透明纯色，不再使用 DWM 亚克力。
+        // 主题挂到窗口资源后，所有 Theme.* 动态资源都从这里解析。
+        _theme = AppearanceTheme.Attach(this);
 
         Left = box.X;
         Top = box.Y;
         ApplyAppearance();
         RefreshBadge();
 
-        MouseEnter += (_, _) => RootBorder.BorderBrush = _hoverBorderBrush;
-        MouseLeave += (_, _) => RootBorder.BorderBrush = _baseBorderBrush;
+        MouseEnter += (_, _) => ApplyInteractionBrush(hover: true);
+        MouseLeave += (_, _) => ApplyInteractionBrush(hover: false);
         DragTimer.Tick += OnDragTick;
         RootBorder.LostMouseCapture += OnBoxLostCapture;
         // 面板实时跟随：盒子每次被系统移动都同步面板（定时器只有 16ms 粒度，会有一拍延迟）
@@ -78,21 +76,12 @@ public partial class BoxWindow : Window
         Loaded += (_, _) => SnapService.ClampIntoScreen(this);
         // SizeToContent 在 Loaded 后才量出真实尺寸，首帧渲染完成后再钳制一次
         ContentRendered += (_, _) => SnapService.ClampIntoScreen(this);
-        _baseBorderBrush = RootBorder.BorderBrush;
-        var hover = new SolidColorBrush(Color.FromArgb(0x7F, 0xFF, 0xFF, 0xFF));
-        hover.Freeze();
-        _hoverBorderBrush = hover;
     }
 
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         var hwnd = new WindowInteropHelper(this).Handle;
         PinToDesktop(hwnd);
-
-        if (!_acrylic) return;
-        if (HwndSource.FromHwnd(hwnd) is HwndSource source && source.CompositionTarget != null)
-            source.CompositionTarget.BackgroundColor = Colors.Transparent;
-        DwmHelper.ApplyAcrylic(hwnd, Box.Rounded);
     }
 
     private const int GWL_HWNDPARENT = -8;
@@ -141,27 +130,27 @@ public partial class BoxWindow : Window
 
     private void ApplyAppearance()
     {
-        var color = ParseColor(Box.BackColor);
-        if (_acrylic)
-        {
-            // 毛玻璃模式：底色作为亚克力上的半透明叠层，透明度映射到底色 alpha
-            var a = (byte)Math.Clamp(Box.Opacity * 140, 20, 180);
-            var b = new SolidColorBrush(Color.FromArgb(a, color.R, color.G, color.B));
-            b.Freeze();
-            RootBorder.Background = b;
-            Opacity = 1.0;
-        }
-        else
-        {
-            var b = new SolidColorBrush(color);
-            b.Freeze();
-            RootBorder.Background = b;
-            Opacity = Box.Opacity;
-        }
+        // 同一套 Theme.* 笔刷驱动表面、描边、文字、分类色；
+        // 底色亮度决定前景是白墨还是深墨，白底不会再出现白字。
+        _theme.Update(Box);
+        // 透明度只作用在底色笔刷上，窗口本身保持不透明，文字永远清晰
+        Opacity = 1.0;
+
         RootBorder.CornerRadius = Box.Rounded ? new CornerRadius(Box.CornerSize) : new CornerRadius(0);
         Topmost = Box.Topmost;
         NameText.Text = Box.Name;
         ApplySizeMode();
+        ApplyInteractionBrush(IsMouseOver);
+    }
+
+    private void ApplyInteractionBrush(bool hover)
+    {
+        string bgKey = _dropActive ? ThemeKeys.SurfaceDrop
+            : hover ? ThemeKeys.SurfaceHover : ThemeKeys.Surface;
+        string borderKey = _dropActive ? ThemeKeys.BorderDrop
+            : hover ? ThemeKeys.BorderHover : ThemeKeys.Border;
+        RootBorder.Background = _theme.BrushOf(bgKey);
+        RootBorder.BorderBrush = _theme.BrushOf(borderKey);
     }
 
     private void ApplySizeMode()
@@ -192,6 +181,7 @@ public partial class BoxWindow : Window
             RefreshInlineItems();
         else
             InlineItems.ItemsSource = null;
+        RefreshPreview();
     }
 
     private class InlineItem : INotifyPropertyChanged
@@ -226,7 +216,9 @@ public partial class BoxWindow : Window
             : new List<string>();
 
         var ordered = Box.Order.Where(names.Contains)
-            .Concat(names.Where(n => !Box.Order.Contains(n)));
+            .Concat(names.Where(n => !Box.Order.Contains(n)))
+            .ToList();
+        var display = DisplayNames.Build(ordered);
 
         _inlineItems = ordered
             .Select(n =>
@@ -235,7 +227,7 @@ public partial class BoxWindow : Window
                 return new InlineItem
                 {
                     FilePath = path,
-                    DisplayName = n,
+                    DisplayName = display[n],
                     Icon = IconService.GetCached(path),
                 };
             })
@@ -319,6 +311,7 @@ public partial class BoxWindow : Window
         if (InlineItemFrom(sender) is not { } item) return;
 
         var menu = new ContextMenu();
+        AppearanceTheme.AttachMenu(menu, Box);
 
         var miOpen = new MenuItem { Header = "打开" };
         miOpen.Click += (_, _) => ShortcutService.Open(item.FilePath);
@@ -346,7 +339,7 @@ public partial class BoxWindow : Window
     private void MoveInlineBack(InlineItem item)
     {
         FileMover.MoveBackToDesktop(new[] { item.FilePath }, out var skipped);
-        Box.Order.Remove(item.DisplayName);
+        Box.Order.Remove(Path.GetFileName(item.FilePath));
         _store.Save(_config);
         RefreshBadge();
         _panel?.RefreshItems();
@@ -390,25 +383,6 @@ public partial class BoxWindow : Window
         _store.Save(_config);
         _panel?.FollowOwner();
     }
-
-    private static Brush ParseBrush(string hex)
-    {
-        try
-        {
-            var c = (Color)ColorConverter.ConvertFromString(hex);
-            var b = new SolidColorBrush(c);
-            b.Freeze();
-            return b;
-        }
-        catch
-        {
-            var b = new SolidColorBrush(Color.FromRgb(0x1F, 0x2A, 0x30));
-            b.Freeze();
-            return b;
-        }
-    }
-
-    private static Color ParseColor(string hex) => ((SolidColorBrush)ParseBrush(hex)).Color;
 
     private DispatcherTimer DragTimer => _dragTimer ??= new DispatcherTimer
     {
@@ -495,6 +469,7 @@ public partial class BoxWindow : Window
     private void OnBoxMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
         var menu = new ContextMenu();
+        AppearanceTheme.AttachMenu(menu, Box);
 
         var miSettings = new MenuItem { Header = "盒子设置…" };
         miSettings.Click += (_, _) => OpenSettings();
@@ -529,16 +504,15 @@ public partial class BoxWindow : Window
         if (!dlg.Applied) return;
 
         _store.Save(_config);
-        if (dlg.AcrylicWanted != AcrylicActive)
-            ((App)Application.Current).RecreateBox(Box);
-        else
-            ApplySettings();
+        ApplySettings();
     }
 
     public void ApplySettings()
     {
         ApplyAppearance();
         RefreshBadge();
+        // 面板可能开着：底色/圆角/前景对比色要跟着一起换
+        _panel?.RefreshTheme();
         _panel?.RefreshItems();
     }
 
@@ -578,8 +552,8 @@ public partial class BoxWindow : Window
     {
         if (_panel != null)
         {
-            _panel.Close();
-            _panel = null;
+            // 走面板自己的幂等关闭入口，避免与失焦关闭撞在同一帧
+            _panel.ClosePanel();
             return;
         }
         _panel = new PanelWindow(this, Box, _config, _store);
@@ -591,15 +565,63 @@ public partial class BoxWindow : Window
 
     public void RefreshBadge()
     {
-        CountText.Text = _store.CountOf(Box).ToString();
+        int count = _store.CountOf(Box);
+        CountText.Text = count.ToString();
+        BadgeBorder.Opacity = count == 0 ? 0.45 : 1.0;
         if (GridHost.Visibility == Visibility.Visible) RefreshInlineItems();
+        RefreshPreview();
+    }
+
+    // 折叠态也要有内容感：最多 3 个文件缩略图；空盒给出拖放引导
+    private void RefreshPreview()
+    {
+        bool collapsed = GridHost.Visibility != Visibility.Visible;
+        PreviewRow.Visibility = collapsed ? Visibility.Visible : Visibility.Collapsed;
+        if (!collapsed)
+        {
+            PreviewIcons.ItemsSource = null;
+            return;
+        }
+
+        var dir = _store.BoxDir(Box);
+        var names = Directory.Exists(dir)
+            ? Directory.EnumerateFileSystemEntries(dir)
+                .Select(Path.GetFileName)
+                .Where(n => n != null)
+                .Cast<string>()
+                .ToList()
+            : new List<string>();
+
+        var ordered = Box.Order.Where(names.Contains)
+            .Concat(names.Where(n => !Box.Order.Contains(n)))
+            .ToList();
+        var display = DisplayNames.Build(ordered);
+        var items = ordered.Take(3).Select(n =>
+        {
+            var path = Path.Combine(dir, n);
+            return new InlineItem
+            {
+                FilePath = path,
+                DisplayName = display[n],
+                Icon = IconService.GetCached(path),
+            };
+        }).ToList();
+
+        bool empty = items.Count == 0;
+        PreviewEmptyHint.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+        PreviewIcons.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+        PreviewMore.Text = empty ? "" : $"共 {names.Count} 项";
+        PreviewIcons.ItemsSource = items;
+        if (!empty) _ = LoadInlineIconsAsync(items);
     }
 
     private void OnDragEnter(object sender, DragEventArgs e)
     {
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
         {
-            RootBorder.BorderBrush = Brushes.White;
+            _dropActive = true;
+            ApplyInteractionBrush(IsMouseOver);
+            PreviewEmptyHint.Text = "松开鼠标即可收纳";
             e.Effects = DragDropEffects.Move;
         }
         else
@@ -611,12 +633,16 @@ public partial class BoxWindow : Window
 
     private void OnDragLeave(object sender, DragEventArgs e)
     {
-        RootBorder.BorderBrush = _baseBorderBrush;
+        _dropActive = false;
+        ApplyInteractionBrush(IsMouseOver);
+        PreviewEmptyHint.Text = "拖放文件到这里";
     }
 
     private void OnDrop(object sender, DragEventArgs e)
     {
-        RootBorder.BorderBrush = _baseBorderBrush;
+        _dropActive = false;
+        ApplyInteractionBrush(IsMouseOver);
+        PreviewEmptyHint.Text = "拖放文件到这里";
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
         if (e.Data.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } files) return;
         MoveIntoBox(files);

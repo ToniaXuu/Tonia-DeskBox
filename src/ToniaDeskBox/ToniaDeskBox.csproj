@@ -24,7 +24,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- app.ico 只用于编译期写入 exe 的 Win32 图标，固定浅色版 -->
     <Resource Include="app.ico" />
+    <!-- 运行时主题图标：按系统 AppsUseLightTheme 在浅/深色之间切换 -->
+    <Resource Include="Assets\app-*.ico" />
   </ItemGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">

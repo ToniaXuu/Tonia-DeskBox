@@ -9,13 +9,19 @@
         ResizeMode="NoResize"
         SizeToContent="WidthAndHeight"
         MaxWidth="470"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        AllowDrop="True"
         PreviewKeyDown="OnPanelPreviewKeyDown"
-        Deactivated="OnPanelDeactivated">
+        Deactivated="OnPanelDeactivated"
+        DragEnter="OnPanelDragEnter"
+        DragOver="OnPanelDragOver"
+        DragLeave="OnPanelDragLeave"
+        Drop="OnPanelDrop">
     <Window.Resources>
-        <Style x:Key="MoreButtonStyle" TargetType="Button">
+        <Style x:Key="IconButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#99FFFFFF"/>
-            <Setter Property="FontSize" Value="15"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="Width" Value="26"/>
             <Setter Property="Height" Value="22"/>
@@ -24,13 +30,14 @@
                     <ControlTemplate TargetType="Button">
                         <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6">
                             <ContentPresenter HorizontalAlignment="Center"
-                                              VerticalAlignment="Center"
-                                              Margin="0,-5,0,0"/>
+                                              VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#1FFFFFFF"/>
-                                <Setter Property="Foreground" Value="White"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Fill}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -38,115 +45,260 @@
             </Setter>
         </Style>
     </Window.Resources>
+
     <!-- 外圈透明边距给投影留渲染空间（分层窗口 alpha=0 区域天然点击穿透） -->
-    <Grid Margin="18">
-        <Border x:Name="Root"
-                Background="#F21A1F2A"
-                CornerRadius="14"
-                Padding="10"
-                BorderThickness="1"
-                BorderBrush="#22FFFFFF">
+    <Grid x:Name="OuterGrid" Margin="18">
+        <!-- 投影层：只放纯色矩形，不含任何文字/图标。
+             Effect 会把整棵子树栅格化成中间位图，挂在内容容器上会让文字二次采样发虚。
+             背景是半透明的，避免变成不透明背板把「透明底色」堵死。 -->
+        <Border x:Name="ShadowCaster" CornerRadius="14" Background="{DynamicResource Theme.ShadowFill}">
             <Border.Effect>
                 <DropShadowEffect BlurRadius="18" ShadowDepth="4" Direction="270"
                                   Opacity="0.5" Color="#000000"/>
             </Border.Effect>
-        <StackPanel>
-            <DockPanel Margin="4,0,2,8">
-                <Button x:Name="MoreButton"
-                        DockPanel.Dock="Right"
-                        Content="⋯"
-                        Click="OnMoreClick"
-                        Style="{StaticResource MoreButtonStyle}"/>
-                <TextBlock x:Name="PanelTitle"
-                           Foreground="#B3FFFFFF"
-                           FontSize="12"
-                           FontWeight="SemiBold"
-                           VerticalAlignment="Center"/>
-            </DockPanel>
-            <TextBlock x:Name="EmptyHint"
-                       Text="把桌面图标拖到盒子上收纳"
-                       Foreground="#80FFFFFF"
-                       FontSize="12"
-                       Margin="10,8"
-                       HorizontalAlignment="Center"/>
-            <ScrollViewer MaxHeight="440" MaxWidth="400"
-                          VerticalScrollBarVisibility="Auto">
-                <Grid x:Name="BandHost" Background="Transparent"
-                      MouseLeftButtonDown="OnBandMouseDown"
-                      MouseMove="OnBandMouseMove"
-                      MouseLeftButtonUp="OnBandMouseUp">
-                    <Rectangle x:Name="Band"
-                               Fill="#1F6E8BFF"
-                               Stroke="#996E8BFF"
-                               StrokeThickness="1"
-                               RadiusX="2" RadiusY="2"
-                               Visibility="Collapsed"
-                               IsHitTestVisible="False"/>
-                    <ItemsControl x:Name="Items">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <WrapPanel Orientation="Horizontal"/>
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Width="80" Height="92" Margin="4"
-                                      Background="Transparent"
-                                      Cursor="Hand"
-                                      MouseLeftButtonDown="OnItemMouseLeftButtonDown"
-                                      MouseMove="OnItemMouseMove"
-                                      MouseLeftButtonUp="OnItemMouseLeftButtonUp"
-                                      MouseRightButtonDown="OnItemRightButtonDown">
-                                    <Border x:Name="SelBg"
-                                            CornerRadius="8"
-                                            Background="Transparent"
-                                            BorderThickness="1"
-                                            BorderBrush="Transparent"/>
-                                    <StackPanel VerticalAlignment="Center">
-                                        <Image Source="{Binding Icon}"
-                                               Width="44" Height="44"
-                                               VerticalAlignment="Center"
-                                               RenderOptions.BitmapScalingMode="HighQuality"/>
-                                        <TextBlock Text="{Binding DisplayName}"
-                                                   Foreground="#EEFFFFFF"
-                                                   FontSize="12"
-                                                   TextWrapping="NoWrap"
-                                                   TextAlignment="Center"
-                                                   TextTrimming="CharacterEllipsis"
-                                                   Margin="0,5,0,0"
-                                                   VerticalAlignment="Top"
-                                                   ToolTip="{Binding DisplayName}"/>
-                                    </StackPanel>
-                                    <TextBlock x:Name="CheckMark"
-                                               Text="✓"
-                                               Foreground="#FF9DB4FF"
-                                               FontWeight="Bold"
-                                               FontSize="12"
-                                               Margin="0,3,5,0"
-                                               HorizontalAlignment="Right"
-                                               VerticalAlignment="Top"
-                                               Visibility="Collapsed"/>
-                                </Grid>
-                                <DataTemplate.Triggers>
-                                    <MultiDataTrigger>
-                                        <MultiDataTrigger.Conditions>
-                                            <Condition Binding="{Binding IsSelected}" Value="False"/>
-                                            <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource Self}}" Value="True"/>
-                                        </MultiDataTrigger.Conditions>
-                                        <Setter TargetName="SelBg" Property="Background" Value="#14FFFFFF"/>
-                                    </MultiDataTrigger>
-                                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                        <Setter TargetName="SelBg" Property="Background" Value="#336E8BFF"/>
-                                        <Setter TargetName="SelBg" Property="BorderBrush" Value="#996E8BFF"/>
-                                        <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
-                                    </DataTrigger>
-                                </DataTemplate.Triggers>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
+        </Border>
+
+        <!-- 内容层：独立、无 Effect，文字走正常渲染路径 -->
+        <Border x:Name="Root" MinWidth="230"
+                Background="{DynamicResource Theme.Surface}"
+                CornerRadius="14"
+                Padding="12,10"
+                BorderThickness="1"
+                BorderBrush="{DynamicResource Theme.Border}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- 顶部强调条：只在内容区内横向铺开。
+                     之前左右各外扩 6px，圆角调大时会戳出圆角边界外 -->
+                <Rectangle x:Name="AccentBar" Grid.RowSpan="5" Height="2"
+                           VerticalAlignment="Top" Margin="0,-8,0,0"
+                           RadiusX="1" RadiusY="1"
+                           Fill="{DynamicResource Theme.Accent}"
+                           IsHitTestVisible="False"/>
+
+                <DockPanel Grid.Row="0" Margin="2,0,0,8">
+                    <Button x:Name="CloseButton" DockPanel.Dock="Right"
+                            Click="OnCloseClick" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="关闭">
+                        <Path Data="M 3,3 L 13,13 M 13,3 L 3,13"
+                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.5"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              Width="16" Height="16"/>
+                    </Button>
+                    <Button x:Name="MoreButton" DockPanel.Dock="Right"
+                            Click="OnMoreClick" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="更多">
+                        <Path Data="M 2,8 L 3.2,8 M 8,8 L 9.2,8 M 14,8 L 15.2,8"
+                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.8"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              Width="18" Height="16"/>
+                    </Button>
+                    <Button x:Name="SearchButton" DockPanel.Dock="Right"
+                            Click="OnSearchClick" Style="{StaticResource IconButtonStyle}"
+                            ToolTip="搜索图标（Ctrl+F）">
+                        <Path Data="M 6.5,1.6 A 4.9,4.9 0 1 1 6.49,1.61 M 10.2,10.2 L 13.4,13.4"
+                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.5"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              StrokeLineJoin="Round"
+                              Width="16" Height="16"/>
+                    </Button>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Ellipse Width="6" Height="6" Margin="0,0,8,0"
+                                 Fill="{DynamicResource Theme.Accent}"/>
+                        <TextBlock x:Name="PanelTitle"
+                                   Foreground="{DynamicResource Theme.Text}"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   VerticalAlignment="Center"/>
+                        <Border x:Name="CountBadge" Background="{DynamicResource Theme.AccentBadge}"
+                                CornerRadius="9" MinWidth="22" Height="18"
+                                Margin="9,0,0,0" Padding="7,0"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="PanelCount"
+                                       Foreground="{DynamicResource Theme.OnAccent}" FontSize="11"
+                                       FontWeight="SemiBold"
+                                       HorizontalAlignment="Center"
+                                       VerticalAlignment="Center"/>
+                        </Border>
+                    </StackPanel>
+                </DockPanel>
+
+                <!-- 搜索栏：默认收起，点放大镜或 Ctrl+F 展开 -->
+                <Border x:Name="SearchBar" Grid.Row="1" Visibility="Collapsed"
+                        Background="{DynamicResource Theme.Fill}"
+                        CornerRadius="7" Height="28" Margin="0,0,0,9">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+
+                        <Path Grid.Column="0"
+                              Data="M 5.5,1.4 A 4.1,4.1 0 1 1 5.49,1.41 M 8.7,8.7 L 11.4,11.4"
+                              Stroke="{DynamicResource Theme.TextMuted}" StrokeThickness="1.4"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              Width="12" Height="12" Stretch="Uniform"
+                              Margin="9,0,7,0" VerticalAlignment="Center"/>
+
+                        <Grid Grid.Column="1">
+                            <TextBlock x:Name="SearchPlaceholder" Text="搜索图标…"
+                                       Foreground="{DynamicResource Theme.TextMuted}" FontSize="12"
+                                       VerticalAlignment="Center" IsHitTestVisible="False"/>
+                            <TextBox x:Name="SearchBox"
+                                     Background="Transparent" BorderThickness="0" Padding="0"
+                                     Foreground="{DynamicResource Theme.Text}" FontSize="12"
+                                     VerticalContentAlignment="Center"
+                                     CaretBrush="{DynamicResource Theme.Text}"
+                                     SelectionBrush="{DynamicResource Theme.Accent}"
+                                     TextChanged="OnSearchTextChanged"/>
+                        </Grid>
+
+                        <Button x:Name="SearchClearButton" Grid.Column="2"
+                                Click="OnSearchClearClick" Style="{StaticResource IconButtonStyle}"
+                                Width="22" Height="22" Margin="0,0,3,0" ToolTip="清空">
+                            <Path Data="M 3.5,3.5 L 9.5,9.5 M 9.5,3.5 L 3.5,9.5"
+                                  Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.4"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  Width="13" Height="13"/>
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <Rectangle Grid.Row="2" Height="1" Fill="{DynamicResource Theme.Divider}"
+                           Margin="-2,0,-2,10" IsHitTestVisible="False"/>
+
+                <Grid Grid.Row="3">
+                    <Grid x:Name="EmptyCard" Visibility="Collapsed"
+                          MinWidth="206" Height="112">
+                        <Rectangle RadiusX="10" RadiusY="10" Fill="{DynamicResource Theme.Fill}"
+                                   Stroke="{DynamicResource Theme.DashStroke}" StrokeThickness="1"
+                                   StrokeDashArray="4 3"/>
+                        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <Path Data="M 2,7 L 8,1 L 17,1 L 23,7 L 23,27 L 2,27 Z"
+                                  Stroke="{DynamicResource Theme.TextSecondary}" StrokeThickness="1.4"
+                                  Fill="Transparent" Stretch="Uniform"
+                                  Width="26" Height="28"
+                                  HorizontalAlignment="Center"/>
+                            <TextBlock x:Name="EmptyHint"
+                                       Text="把桌面图标拖进来收纳"
+                                       Foreground="{DynamicResource Theme.TextSecondary}" FontSize="12"
+                                       Margin="0,8,0,0" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <ScrollViewer x:Name="ItemScroll" MaxHeight="440" MaxWidth="400"
+                                  VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <Grid x:Name="BandHost" Background="Transparent"
+                              MouseLeftButtonDown="OnBandMouseDown"
+                              MouseMove="OnBandMouseMove"
+                              MouseLeftButtonUp="OnBandMouseUp">
+                            <Rectangle x:Name="Band"
+                                       Fill="{DynamicResource Theme.Accent}"
+                                       Stroke="{DynamicResource Theme.Accent}"
+                                       StrokeThickness="1" Opacity="0.22"
+                                       RadiusX="2" RadiusY="2"
+                                       Visibility="Collapsed"
+                                       IsHitTestVisible="False"/>
+                            <ItemsControl x:Name="Items">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel Orientation="Horizontal"/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Width="88" Height="94" Margin="4"
+                                              Background="Transparent"
+                                              Cursor="Hand"
+                                              MouseLeftButtonDown="OnItemMouseLeftButtonDown"
+                                              MouseMove="OnItemMouseMove"
+                                              MouseLeftButtonUp="OnItemMouseLeftButtonUp"
+                                              MouseRightButtonDown="OnItemRightButtonDown">
+                                            <!-- 默认完全无底色：40 个图标直接浮在面板上，靠间距分组。
+                                                 只在悬停 / 选中时才浮现背景，避免一片灰块堆叠。 -->
+                                            <Border x:Name="SelBg"
+                                                    CornerRadius="10"
+                                                    Background="Transparent"
+                                                    BorderThickness="1"
+                                                    BorderBrush="Transparent"/>
+                                            <StackPanel VerticalAlignment="Center">
+                                                <Image Source="{Binding Icon}"
+                                                       Width="42" Height="42"
+                                                       VerticalAlignment="Center"
+                                                       HorizontalAlignment="Center"
+                                                       RenderOptions.BitmapScalingMode="HighQuality"/>
+                                                <TextBlock Text="{Binding DisplayName}"
+                                                           Width="76"
+                                                           HorizontalAlignment="Center"
+                                                           Foreground="{DynamicResource Theme.Text}"
+                                                           FontSize="12"
+                                                           TextWrapping="Wrap"
+                                                           TextAlignment="Center"
+                                                           MaxHeight="30"
+                                                           LineHeight="14"
+                                                           Margin="0,6,0,0"
+                                                           VerticalAlignment="Top"
+                                                           ToolTip="{Binding DisplayName}"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="CheckMark"
+                                                       Text="✓"
+                                                       Foreground="{DynamicResource Theme.Accent}"
+                                                       FontWeight="Bold"
+                                                       FontSize="12"
+                                                       Margin="0,3,5,0"
+                                                       HorizontalAlignment="Right"
+                                                       VerticalAlignment="Top"
+                                                       Visibility="Collapsed"/>
+                                        </Grid>
+                                        <DataTemplate.Triggers>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsSelected}" Value="False"/>
+                                                    <Condition Binding="{Binding IsMouseOver, RelativeSource={RelativeSource Self}}" Value="True"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter TargetName="SelBg" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
+                                            </MultiDataTrigger>
+                                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                <Setter TargetName="SelBg" Property="Background" Value="{DynamicResource Theme.FillStrong}"/>
+                                                <Setter TargetName="SelBg" Property="BorderBrush" Value="{DynamicResource Theme.Accent}"/>
+                                                <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <!-- 少文件时的拖入空位：纯装饰、不参与命中测试，避免干扰框选与排序 -->
+                            <Grid x:Name="DropSlot" Width="88" Height="94" Margin="4"
+                                  HorizontalAlignment="Left" VerticalAlignment="Top"
+                                  Visibility="Collapsed" IsHitTestVisible="False">
+                                <Rectangle RadiusX="10" RadiusY="10" Fill="{DynamicResource Theme.Fill}"
+                                           Stroke="{DynamicResource Theme.DashStroke}" StrokeThickness="1"
+                                           StrokeDashArray="4 3"/>
+                                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <TextBlock Text="+" FontSize="22" Foreground="{DynamicResource Theme.TextMuted}"
+                                               HorizontalAlignment="Center"/>
+                                    <TextBlock Text="拖入文件" FontSize="11" Foreground="{DynamicResource Theme.TextMuted}"
+                                               HorizontalAlignment="Center" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </Grid>
+                        </Grid>
+                    </ScrollViewer>
                 </Grid>
-            </ScrollViewer>
-        </StackPanel>
+
+                <TextBlock x:Name="FooterHint" Grid.Row="4"
+                           Text="拖入收纳 · 拖出放回桌面"
+                           Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
+                           Margin="2,10,0,0" HorizontalAlignment="Center"/>
+            </Grid>
         </Border>
     </Grid>
 </Window>

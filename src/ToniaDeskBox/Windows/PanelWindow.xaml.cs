@@ -8,6 +8,8 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Threading;
 using ToniaDeskBox.Models;
 using ToniaDeskBox.Services;
 using WF = System.Windows.Forms;
@@ -53,7 +55,16 @@ public partial class PanelWindow : Window
     private readonly AppConfig _config;
     private readonly ConfigStore _store;
 
+    /// <summary>面板排序方式。None = 保持 <c>Box.Order</c> 的收纳顺序（默认）。</summary>
+    private enum SortMode { None, Name, Added }
+
     private List<PanelItem> _items = new();
+    // 全量（按 Box.Order 排列）。_items 是它经关键字过滤后的显示集合，
+    // 框选/拖拽/右键/打开都只作用在 _items 上。
+    private List<PanelItem> _allItems = new();
+    private string _filterText = "";
+    private SortMode _sortMode = SortMode.None;
+    private bool _searchOpen;
     private ContextMenu? _openMenu;
     private bool _suppressDeactivate;
 
@@ -78,18 +89,26 @@ public partial class PanelWindow : Window
     private const double BandThreshold = 6;
     private const double DragOutMargin = 14;
 
+    private readonly AppearanceTheme _theme;
+    private bool _dropActive;
+    private bool _openAnimated;
+    // 从面板内拖出文件期间，不要把面板自己的 DragOver 当成外部拖入
+    private bool _internalDrag;
+
     public PanelWindow(BoxWindow owner, BoxConfig box, AppConfig config, ConfigStore store)
     {
         InitializeComponent();
+        // 必须在 InitializeComponent() 之后挂：XAML 有自己的 Window.Resources，
+        // 提前挂会被加载过程替换掉
+        _theme = AppearanceTheme.Attach(this);
         _owner = owner;
         _box = box;
         _config = config;
         _store = store;
 
         PanelTitle.Text = box.Name;
-        Root.Background = BoxBrush();
+        ApplyTheme();
         Owner = owner;
-        ContentRendered += (_, _) => UpdatePlacement();
         RefreshItems();
 
         // 显示前预量尺寸并定位，避免窗口先在默认位置闪现一下
@@ -98,25 +117,174 @@ public partial class PanelWindow : Window
             fe.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
             _designSize = fe.DesiredSize;
         }
+
+        // —— 消除「打开瞬间闪一下」的关键一步 ——
+        // 首帧在窗口 Show 后立刻就被 DWM 合成到屏幕上，而 ContentRendered 是在
+        // 「首帧已经画完」之后才触发的。原实现把「透明化 + 定位」都放在 ContentRendered 里，
+        // 于是第一帧必然是「默认位置 + 完全不透明」，看起来就是先闪一下再归位。
+        // 因此这里在 Show 之前就把内容设为不可见、位移预置好。
+        OuterGrid.Opacity = 0;
+        OuterGrid.RenderTransform = new TranslateTransform(12, -6);
+        WindowStartupLocation = WindowStartupLocation.Manual;
+
+        SourceInitialized += (_, _) =>
+        {
+            // 分层窗口不显式把 DWM 背景设成透明时，首帧会先铺一层不透明白底
+            // （这就是截图里那块白色矩形的来源）。
+            var hwnd = new WindowInteropHelper(this).Handle;
+            if (HwndSource.FromHwnd(hwnd) is { CompositionTarget: { } target })
+                target.BackgroundColor = Colors.Transparent;
+
+            // HWND 已建、窗口尚未显示：此刻定位才是真正意义上的「一次到位」
+            UpdatePlacement();
+        };
+
+        ContentRendered += (_, _) =>
+        {
+            // SizeToContent 下实际尺寸此时才定稿，再校一次位置（此时内容仍不可见）
+            UpdatePlacement();
+            PlayOpenAnimation();
+        };
+
         UpdatePlacement();
     }
 
-    private Brush BoxBrush()
+    private void ApplyTheme()
     {
-        try
+        // 与盒子共用同一套 Theme.* 笔刷：白底自动切深色前景。
+        // 分类色也走 Theme.Accent（每次 Update 换新笔刷对象），
+        // 不再原地改 XAML 资源里的 brush —— 它可能已被 WPF 冻结。
+        _theme.Update(_box);
+
+        double r = _box.Rounded ? Math.Clamp(_box.CornerSize + 2, 10, 18) : 2;
+        Root.CornerRadius = new CornerRadius(r);
+        ShadowCaster.CornerRadius = new CornerRadius(r);
+    }
+
+    /// <summary>盒子设置改动后让已打开的面板跟随刷新（底色 / 圆角 / 前景对比色）。</summary>
+    public void RefreshTheme() => ApplyTheme();
+
+    // 失焦 / Esc / × / 点盒子切换可能在关闭过程中再次触发关闭；
+    // WPF 在 Closing 期间再调 Close() 会抛 InvalidOperationException（会弹全局错误框）。
+    private bool _closing;
+
+    public void ClosePanel()
+    {
+        if (_closing) return;
+        _closing = true;
+        try { Close(); }
+        catch (InvalidOperationException) { }
+    }
+
+    // ---------- 打开动效 ----------
+
+    private void PlayOpenAnimation()
+    {
+        if (_openAnimated) return;
+        _openAnimated = true;
+
+        // 初始的「透明 + 位移」已在构造函数里预置好了（首帧就必须是不可见的），
+        // 这里只负责播放。若 RenderTransform 被意外替换，则兜底重建一次。
+        if (OuterGrid.RenderTransform is not TranslateTransform tt)
         {
-            var c = (Color)ColorConverter.ConvertFromString(_box.BackColor);
-            var b = new SolidColorBrush(c);
-            b.Freeze();
-            return b;
+            tt = new TranslateTransform(12, -6);
+            OuterGrid.RenderTransform = tt;
+            OuterGrid.Opacity = 0;
         }
-        catch
+
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        var dur = TimeSpan.FromMilliseconds(220);
+        tt.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(12, 0, dur) { EasingFunction = ease });
+        tt.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(-6, 0, dur) { EasingFunction = ease });
+        OuterGrid.BeginAnimation(UIElement.OpacityProperty,
+            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)) { EasingFunction = ease });
+    }
+
+    private void AnimateItems()
+    {
+        if (_items.Count == 0) return;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
         {
-            var b = new SolidColorBrush(Color.FromRgb(0x1F, 0x2A, 0x30));
-            b.Freeze();
-            return b;
+            for (int i = 0; i < _items.Count; i++)
+            {
+                if (Items.ItemContainerGenerator.ContainerFromIndex(i) is not FrameworkElement fe)
+                    continue;
+                fe.Opacity = 0;
+                fe.BeginAnimation(UIElement.OpacityProperty,
+                    new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180))
+                    {
+                        BeginTime = TimeSpan.FromMilliseconds(i * 40),
+                        EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                    });
+            }
+        }));
+    }
+
+    // ---------- 拖入高亮与收纳 ----------
+
+    private void ApplyDropVisual(bool active)
+    {
+        _dropActive = active;
+        if (active)
+        {
+            Root.BorderBrush = _theme.BrushOf(ThemeKeys.BorderDrop);
+            FooterHint.Text = "松开鼠标即可收纳";
+            FooterHint.Foreground = _theme.BrushOf(ThemeKeys.Accent);
+        }
+        else
+        {
+            Root.BorderBrush = _theme.BrushOf(ThemeKeys.Border);
+            FooterHint.Text = "拖入收纳 · 拖出放回桌面";
+            FooterHint.Foreground = _theme.BrushOf(ThemeKeys.TextMuted);
         }
     }
+
+    private void OnPanelDragEnter(object sender, DragEventArgs e)
+    {
+        if (_internalDrag || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        ApplyDropVisual(true);
+        e.Effects = DragDropEffects.Move;
+        e.Handled = true;
+    }
+
+    private void OnPanelDragOver(object sender, DragEventArgs e)
+    {
+        if (_internalDrag || !e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        // DragLeave 穿过子元素时会反复触发，DragOver 幂等地把高亮补回来
+        if (!_dropActive) ApplyDropVisual(true);
+        e.Effects = DragDropEffects.Move;
+        e.Handled = true;
+    }
+
+    private void OnPanelDragLeave(object sender, DragEventArgs e) => ApplyDropVisual(false);
+
+    private void OnPanelDrop(object sender, DragEventArgs e)
+    {
+        ApplyDropVisual(false);
+        if (_internalDrag) return;
+        if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0) return;
+
+        var dir = _store.BoxDir(_box);
+        Directory.CreateDirectory(dir);
+        foreach (var src in paths)
+        {
+            var name = Path.GetFileName(src);
+            if (string.IsNullOrEmpty(name)) continue;
+            var target = Path.Combine(dir, name);
+            if (FileMover.ExistsConflict(target)) continue;
+            try { FileMover.MoveTo(src, target); }
+            catch { }
+        }
+        _store.Save(_config);
+        RefreshItems();
+        _owner.RefreshBadge();
+        e.Handled = true;
+    }
+
+    private void OnCloseClick(object sender, RoutedEventArgs e) => ClosePanel();
 
     private Size _designSize;
 
@@ -156,7 +324,7 @@ public partial class PanelWindow : Window
 
     public void FollowOwner() => UpdatePlacement();
 
-    public void RefreshItems()
+    public void RefreshItems(bool animate = true)
     {
         var dir = _store.BoxDir(_box);
         var names = Directory.Exists(dir)
@@ -169,27 +337,71 @@ public partial class PanelWindow : Window
 
         var orderedNames = _box.Order
             .Where(names.Contains)
-            .Concat(names.Where(n => !_box.Order.Contains(n)));
+            .Concat(names.Where(n => !_box.Order.Contains(n)))
+            .ToList();
 
-        _items = orderedNames
+        // .lnk 去掉扩展名显示（会被挤成两行），重名时自动保留全名
+        var display = DisplayNames.Build(orderedNames);
+
+        _allItems = orderedNames
             .Select(n =>
             {
                 var path = Path.Combine(dir, n);
                 return new PanelItem
                 {
                     FilePath = path,
-                    DisplayName = n,
+                    DisplayName = display[n],
                     Icon = IconService.GetCached(path),
                 };
             })
             .ToList();
 
+        // 宽度基线只在「重新扫描目录」时确定。搜索过滤时刻意不动它，
+        // 否则每敲一个字面板就变宽变窄一次，位置也跟着重算，视觉上很晃。
+        BandHost.Width = _allItems.Count <= 2 ? 206 : _allItems.Count <= 6 ? 300 : 400;
+
+        BindVisible(animate);
+    }
+
+    /// <summary>
+    /// 按当前关键字把 <see cref="_allItems"/> 过滤成 <see cref="_items"/> 并绑定。
+    /// 只动「显示集合」，不碰文件、不碰 <c>Box.Order</c>：
+    /// 框选、拖拽、右键、打开都基于 <see cref="_items"/>，所以筛选后自动只作用于可见项。
+    /// </summary>
+    private void BindVisible(bool animate)
+    {
+        var key = _filterText.Trim();
+
+        _items = key.Length == 0
+            ? _allItems.ToList()
+            : _allItems
+                .Where(i => i.DisplayName.Contains(key, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
         Items.ItemsSource = _items;
-        EmptyHint.Visibility = _items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        // 搜索时显示「命中/总数」，一眼能看出被筛掉了多少
+        PanelCount.Text = key.Length == 0
+            ? _allItems.Count.ToString()
+            : $"{_items.Count}/{_allItems.Count}";
+
+        bool empty = _items.Count == 0;
+        EmptyCard.Visibility = empty ? Visibility.Visible : Visibility.Collapsed;
+        ItemScroll.Visibility = empty ? Visibility.Collapsed : Visibility.Visible;
+        EmptyHint.Text = key.Length == 0
+            ? "把桌面图标拖进来收纳"
+            : $"没有匹配「{key}」的图标";
+
+        // 虚线拖入位只在「整盒恰好 1 项」时补位；搜索结果不补，否则会挤乱网格
+        bool showSlot = _items.Count == 1 && key.Length == 0;
+        DropSlot.Visibility = showSlot ? Visibility.Visible : Visibility.Collapsed;
+        if (showSlot) DropSlot.Margin = new Thickness(96, 4, 0, 0);
+
         _owner.RefreshBadge();
 
         // 图标提取放到后台，面板先出来，图标逐个补齐
         _ = LoadIconsAsync(_items);
+        if (animate) AnimateItems();
     }
 
     private async Task LoadIconsAsync(List<PanelItem> items)
@@ -203,19 +415,89 @@ public partial class PanelWindow : Window
         }
     }
 
+    // ---------- 搜索 ----------
+
+    private void OnSearchClick(object sender, RoutedEventArgs e)
+    {
+        if (_searchOpen) CloseSearch();
+        else OpenSearch();
+    }
+
+    private void OpenSearch()
+    {
+        if (_searchOpen) return;
+        _searchOpen = true;
+        SearchBar.Visibility = Visibility.Visible;
+        SearchBox.Text = _filterText;   // 再次打开时保留上次的关键字
+        SyncSearchPlaceholder();
+        SearchBox.Focus();
+        SearchBox.SelectAll();
+        QueuePlacement();
+    }
+
+    private void CloseSearch()
+    {
+        if (!_searchOpen) return;
+        _searchOpen = false;
+        _filterText = "";
+        SearchBox.Text = "";
+        SearchBar.Visibility = Visibility.Collapsed;
+        SyncSearchPlaceholder();
+        BindVisible(animate: false);
+        QueuePlacement();
+        // 焦点必须离开输入框，否则 Ctrl+A / Esc 会被 TextBox 吃掉
+        Keyboard.ClearFocus();
+    }
+
+    private void OnSearchTextChanged(object sender, TextChangedEventArgs e)
+    {
+        _filterText = SearchBox.Text;
+        SyncSearchPlaceholder();
+        // 关搜索时也会触发一次 TextChanged，那次由 CloseSearch 统一处理
+        if (_searchOpen) BindVisible(animate: false);
+    }
+
+    private void OnSearchClearClick(object sender, RoutedEventArgs e)
+    {
+        SearchBox.Text = "";
+        SearchBox.Focus();
+    }
+
+    private void SyncSearchPlaceholder() =>
+        SearchPlaceholder.Visibility = SearchBox.Text.Length == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    // 收起/展开搜索栏会改变窗口高度（SizeToContent），要等布局定稿再重新贴靠盒子，
+    // 否则面板会先按旧高度定位、再跳一下
+    private void QueuePlacement() =>
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(UpdatePlacement));
+
     // ---------- 全局键盘 / 失焦 ----------
 
     private void OnPanelPreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
         {
-            // 分层：先关菜单 → 再清选中 → 最后收面板
-            if (_openMenu?.IsOpen == true)
+            // 分层：先退搜索 → 再关菜单 → 再清选中 → 最后收面板
+            if (_searchOpen)
+                CloseSearch();
+            else if (_openMenu?.IsOpen == true)
                 _openMenu.IsOpen = false;
             else if (_items.Any(i => i.IsSelected))
                 ClearSelection();
             else
-                Close();
+                ClosePanel();
+            e.Handled = true;
+            return;
+        }
+
+        // 焦点在搜索框里时，其余快捷键（含 Ctrl+A 全选文字）都交给输入框
+        if (Keyboard.FocusedElement is TextBox) return;
+
+        if (e.Key == Key.F && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
+        {
+            OpenSearch();
             e.Handled = true;
         }
         else if (e.Key == Key.A && Keyboard.Modifiers.HasFlag(ModifierKeys.Control))
@@ -227,7 +509,7 @@ public partial class PanelWindow : Window
 
     private void OnPanelDeactivated(object? sender, EventArgs e)
     {
-        if (_draggingItem || _sorting || _banding || _suppressDeactivate || _openMenu?.IsOpen == true)
+        if (_draggingItem || _sorting || _banding || _dropActive || _suppressDeactivate || _openMenu?.IsOpen == true)
             return;
 
         // 光标还在面板/盒子上 → 可能是点击盒子切换面板，交给盒子处理
@@ -235,7 +517,7 @@ public partial class PanelWindow : Window
         if (IsCursorOver(this, p) || IsCursorOver(_owner, p))
             return;
 
-        Close();
+        ClosePanel();
     }
 
     private static bool IsCursorOver(Window w, System.Drawing.Point screenPt)
@@ -272,14 +554,31 @@ public partial class PanelWindow : Window
     private void OnMoreClick(object sender, RoutedEventArgs e)
     {
         var menu = new ContextMenu();
+        AppearanceTheme.AttachMenu(menu, _box);
 
         var miDissolve = new MenuItem { Header = "解散收纳盒（文件放回桌面）" };
         miDissolve.Click += (_, _) => DissolveBox();
         menu.Items.Add(miDissolve);
 
-        var miSort = new MenuItem { Header = "按名称排序" };
-        miSort.Click += (_, _) => SortByName();
-        menu.Items.Add(miSort);
+        menu.Items.Add(new Separator());
+
+        var miSortName = new MenuItem
+        {
+            Header = "按名称排序",
+            IsCheckable = true,
+            IsChecked = _sortMode == SortMode.Name,
+        };
+        miSortName.Click += (_, _) => ApplySort(SortMode.Name);
+        menu.Items.Add(miSortName);
+
+        var miSortAdded = new MenuItem
+        {
+            Header = "按放入时间排序",
+            IsCheckable = true,
+            IsChecked = _sortMode == SortMode.Added,
+        };
+        miSortAdded.Click += (_, _) => ApplySort(SortMode.Added);
+        menu.Items.Add(miSortAdded);
 
         _openMenu = menu;
         menu.Closed += (_, _) => _openMenu = null;
@@ -316,19 +615,46 @@ public partial class PanelWindow : Window
             ShowMsg($"以下文件因桌面同名/占用未能放回，已保留在盒子目录：\n{string.Join("\n", skipped)}");
     }
 
-    private void SortByName()
+    /// <summary>
+    /// 重排并写回 <c>Box.Order</c>。
+    /// - <see cref="SortMode.Name"/>：按显示名（已去掉 .lnk）的当前区域文化顺序；
+    /// - <see cref="SortMode.Added"/>：按放入时间，**新放入的在前**。
+    ///   <c>Box.Order</c> 本身就是放入顺序（拖入时追加到末尾），所以越靠后越新；
+    ///   不在 Order 里的（直接拷进盒子目录的文件）一律视为最新。
+    /// </summary>
+    private void ApplySort(SortMode mode)
     {
         var dir = _store.BoxDir(_box);
         if (!Directory.Exists(dir)) return;
 
-        _box.Order = Directory.EnumerateFileSystemEntries(dir)
+        var names = Directory.EnumerateFileSystemEntries(dir)
             .Select(Path.GetFileName)
             .Where(n => n != null)
             .Cast<string>()
-            .OrderBy(n => n, StringComparer.CurrentCulture)
             .ToList();
+
+        List<string> ordered;
+        if (mode == SortMode.Name)
+        {
+            var display = DisplayNames.Build(names);
+            ordered = names.OrderBy(n => display[n], StringComparer.CurrentCulture).ToList();
+        }
+        else
+        {
+            var pos = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < _box.Order.Count; i++)
+                pos[_box.Order[i]] = i;
+
+            ordered = names
+                .OrderByDescending(n => pos.TryGetValue(n, out var i) ? i : int.MaxValue)
+                .ThenBy(n => n, StringComparer.CurrentCulture)
+                .ToList();
+        }
+
+        _sortMode = mode;
+        _box.Order = ordered;
         _store.Save(_config);
-        RefreshItems();
+        RefreshItems(animate: false);
     }
 
     // ---------- 选中 / 框选 ----------
@@ -461,6 +787,8 @@ public partial class PanelWindow : Window
     private void StartSort(FrameworkElement cell)
     {
         if (ItemFrom(cell) is not { } item) return;
+        // 搜索过滤期间只显示命中子集，拖拽重排无法安全写回全量顺序，直接不进入排序
+        if (_filterText.Trim().Length > 0) return;
         _sorting = true;
         _sortIndex = _items.IndexOf(item);
         _visualIndex = _sortIndex;
@@ -566,13 +894,16 @@ public partial class PanelWindow : Window
 
     private void CommitSort()
     {
+        // 筛选状态下 _items 只是子集，用它重建全量顺序会丢掉未匹配的项
+        if (_filterText.Trim().Length > 0) return;
         if (_visualIndex != _sortIndex && _sortIndex >= 0 && _sortIndex < _items.Count)
         {
             var item = _items[_sortIndex];
             _items.RemoveAt(_sortIndex);
             _items.Insert(Math.Clamp(_visualIndex, 0, _items.Count), item);
 
-            _box.Order = _items.Select(i => i.DisplayName).ToList();
+            // Order 存的是真实文件名；DisplayName 可能是去掉 .lnk 的显示名，不能写进去
+            _box.Order = _items.Select(i => Path.GetFileName(i.FilePath)).ToList();
             _store.Save(_config);
         }
     }
@@ -588,7 +919,7 @@ public partial class PanelWindow : Window
             CancelSort();
             _sortCell?.ReleaseMouseCapture();
             _sortCell = null;
-            RefreshItems();
+            RefreshItems(animate: false);
             return;
         }
 
@@ -612,6 +943,7 @@ public partial class PanelWindow : Window
         if (ItemFrom(sender) is not { } item) return;
         _draggingItem = true;
         _actionTaken = true;
+        _internalDrag = true;
 
         // 拖动的是选中集内一项 → 整批拖出
         var sel = SelectedItems();
@@ -636,6 +968,7 @@ public partial class PanelWindow : Window
         {
             _suppressDeactivate = false;
             _draggingItem = false;
+            _internalDrag = false;
         }
 
         RefreshItems();
@@ -657,6 +990,7 @@ public partial class PanelWindow : Window
         bool multi = sel.Count > 1;
 
         var menu = new ContextMenu();
+        AppearanceTheme.AttachMenu(menu, _box);
 
         var miOpen = new MenuItem { Header = multi ? $"打开（{sel.Count}）" : "打开" };
         miOpen.Click += (_, _) =>
@@ -699,7 +1033,7 @@ public partial class PanelWindow : Window
         FileMover.MoveBackToDesktop(items.Select(i => i.FilePath), out var skipped);
 
         foreach (var i in items)
-            _box.Order.Remove(i.DisplayName);
+            _box.Order.Remove(Path.GetFileName(i.FilePath));
         _store.Save(_config);
         RefreshItems();
 

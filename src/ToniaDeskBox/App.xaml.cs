@@ -15,20 +15,28 @@ public partial class App : Application
 {
     private Mutex? _mutex;
     private TrayService? _tray;
+    private AppearanceTheme? _appTheme;
     private readonly List<BoxWindow> _boxWindows = new();
     private DispatcherTimer? _healTimer;
+    private bool _startupCompleted;
 
     public ConfigStore Store { get; private set; } = null!;
     public AppConfig Config { get; private set; } = null!;
     public IReadOnlyList<BoxWindow> BoxWindows => _boxWindows;
+
+    /// <summary>存储迁移进行中：此时盒子目录正在被搬，自愈逻辑必须让路，否则会重建窗口打断迁移。</summary>
+    public bool StorageBusy { get; set; }
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
         DispatcherUnhandledException += OnDispatcherException;
+        // Theme.* 全局默认笔刷必须在任何窗口/控件样式解析前挂好。
+        // 此刻还没读到配置里的主题模式，等 Config 加载后再按主题重算一次。
+        _appTheme = AppearanceTheme.AttachApplication();
 
-        _mutex = new Mutex(true, "ToniaDeskBox_SingleInstance", out var isNew);
+        _mutex = new Mutex(true, @"Local\ToniaDeskBox_SingleInstance", out var isNew);
         if (!isNew)
         {
             MessageBox.Show("Tonia-DeskBox 已在运行。", "Tonia-DeskBox",
@@ -40,7 +48,13 @@ public partial class App : Application
         Store = new ConfigStore();
         Config = Store.Load();
 
-        _tray = new TrayService(Store.DataDir, Config.Settings.Autorun || AutoStartService.IsEnabled());
+        // 主题服务必须早于托盘和任何盒子窗口：图标版本、应用级默认笔刷都依赖它
+        ThemeService.Initialize(Config.Settings.ThemeMode);
+        ThemeService.Changed += OnThemeChanged;
+        AppIconService.Initialize(ThemeService.LightForIcons);
+        _appTheme.Update(ThemeService.ResolveColor(null), AppearanceTheme.DefaultOpacity, "新建盒子");
+
+        _tray = new TrayService(Config, () => Store.DataRoot, Config.Settings.Autorun || AutoStartService.IsEnabled());
         _tray.NewBoxRequested += CreateBox;
         _tray.ShowAllRequested += ShowAll;
         _tray.HideAllRequested += HideAll;
@@ -50,33 +64,18 @@ public partial class App : Application
         _tray.ExportRequested += ExportBackup;
         _tray.ExitRequested += ExitApp;
 
-        var firstRun = Config.Boxes.Count == 0;
-        if (firstRun)
-        {
-            Config.Boxes.Add(new BoxConfig { Name = "系统工具" });
-            Config.Boxes.Add(new BoxConfig { Name = "办公工具" });
-            Store.Save(Config);
-        }
-
+        // 首启口径：ConfigStore.Load() 在无配置时产出 1 个空盒（需求 §12 验收清单）。
+        // 曾经在这里按 Boxes.Count==0 追加"系统工具/办公工具"并自动排列，但 Load() 已先落盘，
+        // 该分支永远为 false；且它与"首启一个空盒"的产品口径冲突，故整段移除。
         foreach (var box in Config.Boxes)
             ShowBox(box);
-
-        if (firstRun && _boxWindows.Count > 0)
-        {
-            var w0 = _boxWindows[0];
-            void OnFirstRendered(object? s, EventArgs args)
-            {
-                w0.ContentRendered -= OnFirstRendered;
-                AutoSortBoxes();
-            }
-            w0.ContentRendered += OnFirstRendered;
-        }
 
         _healTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
         _healTimer.Tick += (_, _) => HealBoxes();
         _healTimer.Start();
 
         _ = PrefetchIconsAsync();
+        _startupCompleted = true;
     }
 
     // 后台预热图标缓存：启动后先把各盒子的图标提取好，用户点盒子时面板能秒开
@@ -87,7 +86,7 @@ public partial class App : Application
         {
             var dir = Store.BoxDir(box);
             if (!Directory.Exists(dir)) continue;
-            foreach (var file in Directory.EnumerateFiles(dir))
+            foreach (var file in Directory.EnumerateFileSystemEntries(dir))
             {
                 try { await IconService.GetAsync(file); }
                 catch { }
@@ -97,6 +96,10 @@ public partial class App : Application
 
     private void HealBoxes()
     {
+        // 迁移期间目录正在被搬走，盒子不可见是正常的，不要在这里抢着重建
+        if (StorageBusy) return;
+
+        bool positionChanged = false;
         foreach (var box in Config.Boxes)
         {
             if (box.Hidden) continue;
@@ -108,9 +111,16 @@ public partial class App : Application
             }
             // explorer 重启后 Progman 是新窗口，需要重新钉到桌面
             w.EnsureDesktopOwner();
-            // 兜底：位置漂移出工作区（如任务栏调整/分辨率变化）自动拉回
-            SnapService.ClampIntoScreen(w);
+            // 兜底：位置漂移出工作区（如任务栏调整/分辨率变化）自动拉回，
+            // 同时把修正后的坐标写回配置，避免重启又弹回旧位置
+            if (SnapService.ClampIntoScreen(w))
+            {
+                box.X = w.Left;
+                box.Y = w.Top;
+                positionChanged = true;
+            }
         }
+        if (positionChanged) Store.Save(Config);
     }
 
     private void AutoSortBoxes()
@@ -140,19 +150,37 @@ public partial class App : Application
 
     private void OnDispatcherException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs args)
     {
+        LogError(args.Exception.ToString());
+        MessageBox.Show($"发生错误：{args.Exception.Message}\n\n详细信息见数据目录 error.log",
+            "Tonia-DeskBox", MessageBoxButton.OK, MessageBoxImage.Warning);
+        args.Handled = true;
+
+        if (_startupCompleted) return;
+
+        // 启动阶段失败必须释放单实例锁并退出：
+        // ShutdownMode=OnExplicitShutdown 下，仅标记 Handled 会留下一个无界面却占着 Mutex 的进程，
+        // 用户再次双击只会看到"已在运行"，只能手动结束进程。
+        try { _mutex?.Dispose(); }
+        catch { }
+        _mutex = null;
+        Shutdown(1);
+    }
+
+    private void LogError(string message)
+    {
         try
         {
-            var dir = Store?.DataDir ?? AppContext.BaseDirectory;
+            var dir = Store?.ConfigDir ?? Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Tonia-DeskBox");
+            Directory.CreateDirectory(dir);
             File.AppendAllText(Path.Combine(dir, "error.log"),
-                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}\n{args.Exception}\n\n");
+                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} {message}\n\n");
         }
         catch
         {
             // 日志写不进去也不能让异常吞掉主线程
         }
-        MessageBox.Show($"发生错误：{args.Exception.Message}\n\n详细信息见数据目录 error.log",
-            "Tonia-DeskBox", MessageBoxButton.OK, MessageBoxImage.Warning);
-        args.Handled = true;
     }
 
     private void ShowBox(BoxConfig box)
@@ -177,6 +205,29 @@ public partial class App : Application
         ShowBox(box);
     }
 
+    /// <summary>
+    /// 存储位置迁移完成后调用。所有盒子的物理目录都变了，已打开的窗口和面板
+    /// 还连着旧路径，必须整体重建；同时重新预热图标缓存。
+    /// </summary>
+    public void OnDataRootChanged()
+    {
+        _healTimer?.Stop();
+        var boxes = Config.Boxes.ToList();
+
+        foreach (var w in _boxWindows.ToList())
+        {
+            w.BoxDeleted -= OnBoxDeleted;
+            try { w.Close(); }
+            catch (InvalidOperationException) { }
+        }
+        _boxWindows.Clear();
+
+        foreach (var b in boxes) ShowBox(b);
+        _healTimer?.Start();
+
+        _ = PrefetchIconsAsync();
+    }
+
     private void CreateBox()
     {
         var existing = Config.Boxes.Select(b => b.Name).ToHashSet(StringComparer.Ordinal);
@@ -189,7 +240,6 @@ public partial class App : Application
         {
             box.Opacity = g.Opacity;
             box.BackColor = g.BackColor;
-            box.Acrylic = g.Acrylic && DwmHelper.IsAcrylicSupported();
             box.Rounded = g.Rounded;
             box.CornerSize = g.CornerSize;
             box.Topmost = g.Topmost;
@@ -208,28 +258,41 @@ public partial class App : Application
         dlg.ShowDialog();
     }
 
+    /// <summary>
+    /// 主题变化：手动切换模式，或「跟随系统」时系统改了深浅。
+    /// 底色是渲染时解析出来的、不写回盒子数据，所以这里只刷新，不动文件。
+    /// </summary>
+    private void OnThemeChanged()
+    {
+        if (Config.Settings.ThemeMode != ThemeService.Mode)
+        {
+            Config.Settings.ThemeMode = ThemeService.Mode;
+            Store.Save(Config);
+        }
+
+        // 应用级默认笔刷（ToolTip / 无父窗口的菜单）跟着一起换
+        _appTheme?.Update(ThemeService.ResolveColor(null), AppearanceTheme.DefaultOpacity, "新建盒子");
+        AppIconService.SetLight(ThemeService.LightForIcons);
+
+        foreach (var w in _boxWindows.ToList())
+            w.ApplySettings();
+    }
+
     public void ApplyGlobalToAllBoxes(GlobalBoxSettings g)
     {
         foreach (var box in Config.Boxes)
         {
             box.Opacity = g.Opacity;
             box.BackColor = g.BackColor;
-            box.Acrylic = g.Acrylic;
             box.Rounded = g.Rounded;
             box.CornerSize = g.CornerSize;
             box.Topmost = g.Topmost;
         }
         Store.Save(Config);
 
-        // 毛玻璃模式切换会改变 AllowsTransparency，必须整窗重建；其余原地刷新
+        // 底色 / 圆角 / 分类色都是可变笔刷，原地刷新即可，无需重建窗口
         foreach (var w in _boxWindows.ToList())
-        {
-            bool acrylicNow = w.Box.Acrylic && DwmHelper.IsAcrylicSupported();
-            if (w.AcrylicActive != acrylicNow)
-                RecreateBox(w.Box);
-            else
-                w.ApplySettings();
-        }
+            w.ApplySettings();
     }
 
     private void OnBoxDeleted(BoxConfig box)
@@ -284,7 +347,8 @@ public partial class App : Application
 
         try
         {
-            BackupService.ExportZip(Store.DataDir, dlg.FileName);
+            BackupService.ExportZip(Store.DataRoot, dlg.FileName,
+                System.IO.Path.Combine(Store.ConfigDir, "config.json"));
             MessageBox.Show($"备份完成：\n{dlg.FileName}", "Tonia-DeskBox",
                 MessageBoxButton.OK, MessageBoxImage.Information);
         }
@@ -304,7 +368,10 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        ThemeService.Changed -= OnThemeChanged;
+        ThemeService.Shutdown();
         _tray?.Dispose();
+        AppIconService.Shutdown();
         _mutex?.Dispose();
         base.OnExit(e);
     }

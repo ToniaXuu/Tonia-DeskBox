@@ -21,13 +21,15 @@ public partial class BoxSettingsWindow : Window
     private readonly ConfigStore _store;
     private readonly List<(Button Btn, string Hex)> _swatches = new();
     private string _selectedColor;
+    // 可能为空：InitializeComponent() 期间滑杆 ValueChanged 会先触发一次预览
+    private AppearanceTheme? _theme;
 
     public bool Applied { get; private set; }
-    public bool AcrylicWanted { get; private set; }
 
     public BoxSettingsWindow(BoxConfig box, AppConfig config, ConfigStore store)
     {
         InitializeComponent();
+        _theme = AppearanceTheme.Attach(this);
         _box = box;
         _config = config;
         _store = store;
@@ -39,13 +41,21 @@ public partial class BoxSettingsWindow : Window
         HeightSlider.Value = box.H;
         RoundedCheck.IsChecked = box.Rounded;
         RadiusSlider.Value = box.CornerSize;
-        AcrylicCheck.IsChecked = box.Acrylic;
-        AcrylicCheck.IsEnabled = DwmHelper.IsAcrylicSupported();
         TopmostCheck.IsChecked = box.Topmost;
 
         BuildSwatches();
         SyncValueBoxes();
+        ApplyThemeLock();
         UpdatePreview();
+    }
+
+    /// <summary>主题接管底色时，色板与取色按钮不再生效，并说明原因。</summary>
+    private void ApplyThemeLock()
+    {
+        bool locked = ThemeService.IsColorLocked;
+        SwatchPanel.IsEnabled = !locked;
+        WallpaperBtn.IsEnabled = !locked;
+        ThemeLockHint.Visibility = locked ? Visibility.Visible : Visibility.Collapsed;
     }
 
     // ---------- 数值输入框 ↔ 滑杆 ----------
@@ -111,7 +121,7 @@ public partial class BoxSettingsWindow : Window
         foreach (var (btn, hex) in _swatches)
         {
             bool on = string.Equals(hex, _selectedColor, StringComparison.OrdinalIgnoreCase);
-            btn.BorderBrush = on ? Brushes.White : new SolidColorBrush(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
+            btn.BorderBrush = _theme!.BrushOf(on ? ThemeKeys.Ring : ThemeKeys.Border);
             btn.BorderThickness = new Thickness(on ? 2 : 1);
         }
     }
@@ -150,6 +160,8 @@ public partial class BoxSettingsWindow : Window
         }
 
         var menu = new ContextMenu();
+        AppearanceTheme.Attach(menu).Update(
+            ThemeService.ResolveColor(_selectedColor), OpacitySlider.Value / 100.0, _box.Name, minAlpha: 0.9);
         foreach (var src in others)
         {
             var mi = new MenuItem { Header = src.Name };
@@ -167,7 +179,6 @@ public partial class BoxSettingsWindow : Window
         _selectedColor = src.BackColor;
         RoundedCheck.IsChecked = src.Rounded;
         RadiusSlider.Value = src.CornerSize;
-        AcrylicCheck.IsChecked = src.Acrylic && DwmHelper.IsAcrylicSupported();
         TopmostCheck.IsChecked = src.Topmost;
         WidthSlider.Value = Math.Clamp(Math.Round(src.W / 10) * 10, 0, 560);
         HeightSlider.Value = Math.Clamp(Math.Round(src.H / 10) * 10, 0, 460);
@@ -186,10 +197,25 @@ public partial class BoxSettingsWindow : Window
 
     private void UpdatePreview()
     {
-        PreviewBorder.Background = MakeBrush(_selectedColor);
+        if (_theme is null) return;   // InitializeComponent 期间的早期回调
+
+        // 设置窗口本身也用同一套主题：切换底色时立刻看到真实的文字对比效果。
+        // 对话框文字密集，透明度下限比桌面盒子高，保证可读。
+        // 主题模式接管时用主题色，自定义时用盒子自己的颜色。
+        var hex = ThemeService.ResolveColor(_selectedColor);
+        _theme.Update(hex, OpacitySlider.Value / 100.0, _box.Name, minAlpha: 0.9);
+
+        double radius = RoundedCheck.IsChecked == true ? RadiusSlider.Value : 0;
+        PreviewBorder.Background = MakeBrush(hex);
         PreviewBorder.Opacity = Math.Max(OpacitySlider.Value / 100.0, 0.15);
-        var radius = RoundedCheck.IsChecked == true ? RadiusSlider.Value : 0;
         PreviewBorder.CornerRadius = new CornerRadius(radius);
+
+        // 圆角规则与展开面板一致，两个设置窗口看起来是同一个组件
+        double r = RoundedCheck.IsChecked == true ? Math.Clamp(RadiusSlider.Value + 2, 10, 18) : 2;
+        ChromeBorder.CornerRadius = new CornerRadius(r);
+        ShadowCaster.CornerRadius = new CornerRadius(r);
+        TitleBar.CornerRadius = new CornerRadius(r - 1, r - 1, 0, 0);
+
         UpdateSwatchSelection();
         SyncValueBoxes();
     }
@@ -219,9 +245,11 @@ public partial class BoxSettingsWindow : Window
             MessageBox.Show(this, "盒子名称不能为空。", "Tonia-DeskBox");
             return;
         }
-        if (name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+        if (!ConfigStore.IsSafeSegment(name))
         {
-            MessageBox.Show(this, "名称不能包含 \\ / : * ? \" < > | 等字符。", "Tonia-DeskBox");
+            MessageBox.Show(this,
+                "名称不能是 . 或 ..，不能包含 \\ / : * ? \" < > | 等字符，也不能使用系统保留名（CON、PRN、NUL、COM1…）。",
+                "Tonia-DeskBox");
             return;
         }
 
@@ -265,8 +293,6 @@ public partial class BoxSettingsWindow : Window
         _box.H = HeightSlider.Value;
         _box.Rounded = RoundedCheck.IsChecked == true;
         _box.CornerSize = RadiusSlider.Value;
-        AcrylicWanted = AcrylicCheck.IsChecked == true;
-        _box.Acrylic = AcrylicWanted;
         _box.Topmost = TopmostCheck.IsChecked == true;
 
         Applied = true;

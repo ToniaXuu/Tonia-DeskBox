@@ -51,13 +51,16 @@ public static class SnapService
         return changed;
     }
 
-    public static void ClampIntoScreen(Window window)
+    // 返回是否真的修正了位置：调用方据此写回配置，同时避免无谓触发 LocationChanged
+    public static bool ClampIntoScreen(Window window)
     {
-        if (!GetInfo(window, out var info)) return;
+        if (!GetInfo(window, out var info)) return false;
         double l = window.Left, t = window.Top;
         Clamp(ref l, ref t, window.ActualWidth, window.ActualHeight, info);
+        if (Math.Abs(l - window.Left) <= 0.1 && Math.Abs(t - window.Top) <= 0.1) return false;
         window.Left = l;
         window.Top = t;
+        return true;
     }
 
     // 注意单位：Wa 是物理像素，left/top/w/h 是 DIP，必须先换算再运算

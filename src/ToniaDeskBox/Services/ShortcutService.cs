@@ -109,8 +109,16 @@ public static class ShortcutService
         dynamic shell = Activator.CreateInstance(shellType)!;
         try
         {
-            dynamic lnk = shell.CreateShortcut(lnkPath);
-            return ((string)lnk.TargetPath, (string)lnk.Arguments, (string)lnk.WorkingDirectory);
+            object lnkObj = shell.CreateShortcut(lnkPath);
+            try
+            {
+                dynamic lnk = lnkObj;
+                return ((string)lnk.TargetPath, (string)lnk.Arguments, (string)lnk.WorkingDirectory);
+            }
+            finally
+            {
+                Marshal.FinalReleaseComObject(lnkObj);
+            }
         }
         finally
         {
