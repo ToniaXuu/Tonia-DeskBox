@@ -11,9 +11,22 @@
     <AssemblyName>ToniaDeskBox</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>0.1.0</Version>
+
+    <!-- 版本号是更新检查的唯一依据：安装包文件名、Release 标签、
+         程序内「关于」三处必须一致，改版本只需改这一行 + installer 里的同名默认值。
+         AssemblyVersion / FileVersion / InformationalVersion 全部由它推导，
+         这样 CI 用 -p:Version=x.y.z 注入时，文件属性也会跟着变。 -->
+    <Version>0.2.0</Version>
     <Product>Tonia-DeskBox</Product>
+    <AssemblyTitle>Tonia-DeskBox</AssemblyTitle>
+    <Description>桌面盒子整理工具</Description>
     <Company>Tonia</Company>
+    <Copyright>Copyright © 2026 Tonia</Copyright>
+
+    <!-- 默认会在 InformationalVersion 后面拼 "+提交哈希"，更新检查要按语义版本比较，
+         这里关掉，保证 AssemblyInformationalVersion 就是干净的 0.2.0 -->
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
   </PropertyGroup>
 
@@ -32,8 +45,15 @@
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <SelfContained>false</SelfContained>
+    <!-- 自带运行时：装机用户不必预装 .NET 桌面运行时，安装包才能「双击即可用」 -->
+    <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
+    <!-- 原生库一起塞进单文件，否则 exe 旁边还会散落一堆 dll，安装/升级都不干净 -->
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <!-- 单文件压缩：146MB → 约 60MB，更新下载量与安装包体积都受益 -->
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
 </Project>

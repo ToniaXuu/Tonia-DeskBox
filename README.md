@@ -5,8 +5,8 @@ Windows 11 桌面收纳小工具：把桌面快捷方式/文件拖进一个个�
 
 ## 运行环境
 
-- Windows 11（Win10 尽力而为）。不再依赖 DWM 亚克力 / Mica，任何支持 .NET 8 的 Windows 都能得到一致外观。
-- **.NET 8 Desktop Runtime**（framework-dependent 发布，必须安装）：<https://dotnet.microsoft.com/download/dotnet/8.0>
+- Windows 10 1809+ / Windows 11。不再依赖 DWM 亚克力 / Mica，任何支持 .NET 8 的 Windows 都能得到一致外观。
+- **安装包自带 .NET 8 运行时**（self-contained 单文件），装机用户无需预装任何运行时。
 - 开发构建需要 .NET 8 SDK；仓库 `global.json` 固定 8.0 主版本并允许同主版本内滚动。
 
 ## 构建与发布
@@ -16,22 +16,51 @@ Windows 11 桌面收纳小工具：把桌面快捷方式/文件拖进一个个�
 dotnet build ToniaDeskBox.sln -c Debug
 # → src/ToniaDeskBox/bin/Debug/net8.0-windows/ToniaDeskBox.exe
 
-# Release build：仍是多文件，且因 RuntimeIdentifier=win-x64 多一层目录
-dotnet build ToniaDeskBox.sln -c Release
-# → src/ToniaDeskBox/bin/Release/net8.0-windows/win-x64/ToniaDeskBox.exe
-
-# 单文件发布（真正的交付形态）
-dotnet publish src/ToniaDeskBox/ToniaDeskBox.csproj -c Release -o <输出目录>
-# → <输出目录>/ToniaDeskBox.exe（约 1 MB，含深浅两套图标资源，满足 ≤5MB）+ ToniaDeskBox.pdb
+# 单文件发布（交付形态）：自带运行时 + LZMA 压缩，约 64 MB
+dotnet publish src/ToniaDeskBox/ToniaDeskBox.csproj -c Release -r win-x64 --self-contained true -o publish
+# → publish/ToniaDeskBox.exe
 ```
 
-> `PublishSingleFile` 只在 `dotnet publish` 生效；`dotnet build -c Release` 得到的是多文件产物，
-> 两者输出路径不同，写脚本时别混用。pdb 可随分发，也可删除。
+> `PublishSingleFile` / `SelfContained` 只在 Release 配置生效，`dotnet build -c Debug` 得到的是多文件产物，
+> 两者输出路径不同，写脚本时别混用。
+
+### 打安装包
+
+```bash
+winget install JRSoftware.InnoSetup            # 只需一次
+ISCC.exe installer\ToniaDeskBox.iss /DAppVersion=0.2.0
+# → dist/ToniaDeskBox-Setup-0.2.0.exe
+```
+
+安装包是**每用户安装**（`%LOCALAPPDATA%\Programs\Tonia-DeskBox`，不弹 UAC），
+`AppId` 固定不变，因此再运行一次新版本安装包就是原地覆盖升级，不会装出第二份。
+
+### 发布新版本（「检查更新」靠它生效）
+
+程序查的是 **GitHub Releases 的最新一条**（公开仓库，匿名可读，不需要令牌）。发版只有一步：
+
+```bash
+git tag v0.2.1 && git push origin v0.2.1
+```
+
+推 tag 触发 `.github/workflows/release.yml`：按 tag 推导版本号 → 发布 self-contained 单文件 →
+编译安装包 → 把 `ToniaDeskBox-Setup-<版本>.exe` 传进 Release。
+之后用户在托盘点「检查更新…」即可看到版本说明并一键升级。
+
+版本号由 CI 从 tag 统一注入（`-p:Version=` 与 `ISCC /DAppVersion=`），
+本地手工构建时则取 `csproj` 的 `<Version>` 与 `iss` 的 `AppVersion` 默认值，两个默认值请保持一致。
+
+不发布也能自检整条链路（解析、版本比较、下载、大小与 SHA256 校验）：
+
+```bash
+dotnet run --project tools/UpdateProbe -- --download
+# 想验证"有新版本"的分支，可用 TONIA_UPDATE_API 指向本地假数据
+```
+
 
 ## 运行
 
-双击 exe 即可。**不要以管理员身份运行**（权限不一致会导致盒子挂不上桌面、拖放失败），
-也不要放在 `C:\Program Files`（数据目录写入会失败），建议放 `D:\Tools\Tonia-DeskBox\`。
+双击 exe 即可。**不要以管理员身份运行**（权限不一致会导致盒子挂不上桌面、拖放失败）。
 
 - 首启：生成 **1 个空盒「新建盒子」**，默认位置 `(120, 120)`；不自动创建示例盒、不自动排列。
 - 盒子是 Progman 的 owned window，不进任务栏 / Alt+Tab；`Process.MainWindowHandle = 0` 属正常，不是启动失败。
@@ -45,11 +74,25 @@ dotnet publish src/ToniaDeskBox/ToniaDeskBox.csproj -c Release -o <输出目录>
 
 | 内容 | 位置 | 是否可改 |
 |---|---|---|
-| 配置 / 备份 / 日志 | 固定目录：发布版 `exe 同级`，开发版 `%LOCALAPPDATA%\Tonia-DeskBox\` | 否（只有几 KB，固定住才能始终找得到） |
+| 配置 / 备份 / 日志 | 固定目录：**安装版** `%LOCALAPPDATA%\Tonia-DeskBox\`、绿色版 `exe 同级`、开发版 `%LOCALAPPDATA%\Tonia-DeskBox\` | 否（只有几 KB，固定住才能始终找得到） |
 | 盒子文件（`盒子名\文件…`） | **数据根**，默认 `固定目录\boxes`（开发版 `boxes-dev`） | **是**，全局盒子设置 → 存储 → 更改 |
 
 为什么必须拆开：`config.json` 里记着数据根在哪。如果配置本身也放在数据根里，
 把数据根挪到 D 盘之后，下次启动就不知道该去哪儿读配置了。
+
+### 安装版与覆盖升级
+
+安装目录里只有 `ToniaDeskBox.exe` 和一个 `app-installed.marker` 标记文件；
+程序看到标记就把配置与数据放到 `%LOCALAPPDATA%\Tonia-DeskBox\`，**不写安装目录**。
+这条规则是整个升级安全的底座：
+
+- 覆盖安装只替换安装目录里的 exe，用户数据不在它的作业范围内；
+- 卸载同样不碰用户数据，卸载后重装新版本，盒子照旧；
+- 换机/换盘：把 `%LOCALAPPDATA%\Tonia-DeskBox` 整个拷走即可；
+- 绿色版（exe 同级自带 `config.json`）优先按便携模式运行，不受安装版影响。
+
+程序内「检查更新…」下载的安装包放在 `%LOCALAPPDATA%\Tonia-DeskBox\updates\`，
+只保留最新一个；更新时会先写盘配置，再以 `/SILENT` 覆盖安装，装完自动重启程序。
 
 ### 更改存储位置
 

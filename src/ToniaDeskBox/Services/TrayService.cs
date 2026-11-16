@@ -35,6 +35,7 @@ public class TrayService : IDisposable
     public event Action<bool>? AutoStartToggled;
     public event Action? GlobalSettingsRequested;
     public event Action? ExportRequested;
+    public event Action? UpdateRequested;
     public event Action? ExitRequested;
 
     public TrayService(AppConfig config, Func<string> dataRoot, bool autoStart)
@@ -119,6 +120,8 @@ public class TrayService : IDisposable
             }
         });
         AddItem(menu, "导出备份（Zip）…", () => ExportRequested?.Invoke());
+        menu.Items.Add(new Separator());
+        AddItem(menu, "检查更新…", () => UpdateRequested?.Invoke());
         menu.Items.Add(new Separator());
         AddItem(menu, "退出", () => ExitRequested?.Invoke());
 

@@ -25,6 +25,12 @@ public class ConfigStore
     private const string PortableDataDirName = "boxes";
 
     /// <summary>
+    /// 安装包会把这个空标记文件放进安装目录。看到它就说明「这是安装版」，
+    /// 配置与数据都不该留在安装目录里——否则覆盖安装 / 卸载会把用户数据一起带走。
+    /// </summary>
+    private const string InstalledMarkerName = "app-installed.marker";
+
+    /// <summary>
     /// 配置与日志的固定位置。刻意不跟随数据根移动：配置只有几 KB，
     /// 放在稳定位置才能保证「数据根被改到别的盘后，下次启动仍找得到配置」。
     /// </summary>
@@ -74,27 +80,64 @@ public class ConfigStore
     private static string ResolveConfigDir(out string defaultDataRoot)
     {
         var exeDir = AppContext.BaseDirectory;
+        var userDir = Path.Combine(LocalAppData, "Tonia-DeskBox");
 
-        // 开发构建输出目录会被 dotnet clean / 删除 bin / git clean -xdf 清空，
+        // 1) 安装版：配置固定放用户目录，程序目录只放程序本身。
+        //    这一条必须排在最前面。安装目录里一旦意外出现 config.json（历史版本写进去的、
+        //    或者手工拷贝留下的），后面的「便携版」分支就会把程序切到那份空配置上，
+        //    用户看起来就是盒子全没了——所以标记文件优先级高于一切。
+        if (File.Exists(Path.Combine(exeDir, InstalledMarkerName)))
+        {
+            defaultDataRoot = ResolveUserDataRoot(userDir);
+            return userDir;
+        }
+
+        // 2) 便携版自带配置：exe 同级有 config.json 就以它为准，整个目录拷走即可迁移。
+        if (File.Exists(Path.Combine(exeDir, "config.json")))
+        {
+            defaultDataRoot = Path.Combine(exeDir, PortableDataDirName);
+            return exeDir;
+        }
+
+        // 3) 用户目录里已有配置（开发构建 → 安装版、或曾经用过安装版的机器）：
+        //    继续用它，绝不因为换了个 exe 位置就退回默认配置。
+        if (File.Exists(Path.Combine(userDir, "config.json")))
+        {
+            defaultDataRoot = ResolveUserDataRoot(userDir);
+            return userDir;
+        }
+
+        // 4) 开发构建输出目录会被 dotnet clean / 删除 bin / git clean -xdf 清空，
         // 配置与被收纳的文件都不能留在这里。
         if (IsBuildOutputDir(exeDir))
         {
-            var dir = Path.Combine(LocalAppData, "Tonia-DeskBox");
-            defaultDataRoot = Path.Combine(dir, DevDataDirName);
-            return dir;
+            defaultDataRoot = Path.Combine(userDir, DevDataDirName);
+            return userDir;
         }
 
-        // 绿色版：配置与默认数据都在 exe 同级，整体拷贝即可迁移
+        // 5) 绿色版：配置与默认数据都在 exe 同级，整体拷贝即可迁移
         if (CanWrite(exeDir))
         {
             defaultDataRoot = Path.Combine(exeDir, PortableDataDirName);
             return exeDir;
         }
 
-        // exe 处在只读位置（如 Program Files）时退回用户目录
-        var fallback = Path.Combine(LocalAppData, "Tonia-DeskBox");
-        defaultDataRoot = Path.Combine(fallback, PortableDataDirName);
-        return fallback;
+        // 6) exe 处在只读位置（如 Program Files）时退回用户目录
+        defaultDataRoot = Path.Combine(userDir, PortableDataDirName);
+        return userDir;
+    }
+
+    /// <summary>
+    /// 安装版的默认数据根。开发期留下的 boxes-dev 里可能已经装满了用户的快捷方式，
+    /// 直接切到空的 boxes 会让盒子显示为空，所以两处都探测：已有 boxes 用 boxes，
+    /// 否则沿用 boxes-dev。配置里显式写了 DataRoot 时以配置为准，这里只是兜底。
+    /// </summary>
+    private static string ResolveUserDataRoot(string userDir)
+    {
+        var normal = Path.Combine(userDir, PortableDataDirName);
+        var dev = Path.Combine(userDir, DevDataDirName);
+        if (!Directory.Exists(normal) && Directory.Exists(dev)) return dev;
+        return normal;
     }
 
     private static bool IsBuildOutputDir(string dir)

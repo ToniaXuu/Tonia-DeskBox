@@ -2,6 +2,7 @@
 bin/
 obj/
 publish/
+dist/
 
 # IDE
 .vs/
@@ -14,3 +15,7 @@ boxes/
 # OS
 Thumbs.db
 Desktop.ini
+
+# 本地工具/会话数据（不属于项目内容）
+.workbuddy/
+.qoder-credits/

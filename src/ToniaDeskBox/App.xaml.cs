@@ -13,7 +13,16 @@ namespace ToniaDeskBox;
 
 public partial class App : Application
 {
+    /// <summary>
+    /// 安装包用 `ToniaDeskBox.exe --quit` 请运行中的实例退出。
+    /// 走命名信号而不是强杀：退出前能把配置落盘、托盘图标正常移除，
+    /// 也不需要安装包去调 taskkill 这类外部程序。
+    /// </summary>
+    private const string QuitSignalName = @"Local\ToniaDeskBox_Quit";
+
     private Mutex? _mutex;
+    private EventWaitHandle? _quitSignal;
+    private Thread? _quitListener;
     private TrayService? _tray;
     private AppearanceTheme? _appTheme;
     private readonly List<BoxWindow> _boxWindows = new();
@@ -31,6 +40,14 @@ public partial class App : Application
     {
         base.OnStartup(e);
 
+        // 安装包请现有实例退出：这一步必须早于单实例检查，否则只会弹「已在运行」
+        if (e.Args.Any(a => string.Equals(a, "--quit", StringComparison.OrdinalIgnoreCase)))
+        {
+            SignalExistingInstanceToQuit();
+            Shutdown();
+            return;
+        }
+
         DispatcherUnhandledException += OnDispatcherException;
         // Theme.* 全局默认笔刷必须在任何窗口/控件样式解析前挂好。
         // 此刻还没读到配置里的主题模式，等 Config 加载后再按主题重算一次。
@@ -45,8 +62,9 @@ public partial class App : Application
             return;
         }
 
-        Store = new ConfigStore();
-        Config = Store.Load();
+        StartQuitListener();
+
+        Store = new ConfigStore();        Config = Store.Load();
 
         // 主题服务必须早于托盘和任何盒子窗口：图标版本、应用级默认笔刷都依赖它
         ThemeService.Initialize(Config.Settings.ThemeMode);
@@ -62,6 +80,7 @@ public partial class App : Application
         _tray.AutoStartToggled += OnAutoStartToggled;
         _tray.GlobalSettingsRequested += OpenGlobalSettings;
         _tray.ExportRequested += ExportBackup;
+        _tray.UpdateRequested += OpenUpdate;
         _tray.ExitRequested += ExitApp;
 
         // 首启口径：ConfigStore.Load() 在无配置时产出 1 个空盒（需求 §12 验收清单）。
@@ -78,9 +97,71 @@ public partial class App : Application
         _startupCompleted = true;
     }
 
-    // 后台预热图标缓存：启动后先把各盒子的图标提取好，用户点盒子时面板能秒开
-    private async Task PrefetchIconsAsync()
+    // ---------- 被安装包请求退出 ----------
+
+    /// <summary>
+    /// 起一个后台线程守着退出信号。信号由 `--quit` 那个短命进程发出，
+    /// 收到后回到 UI 线程走正常退出流程（保存配置、移除托盘图标）。
+    /// </summary>
+    private void StartQuitListener()
     {
+        try
+        {
+            _quitSignal = new EventWaitHandle(false, EventResetMode.AutoReset, QuitSignalName);
+        }
+        catch
+        {
+            return; // 建不出来不影响正常使用，只是安装时可能要多等一会儿
+        }
+
+        _quitListener = new Thread(() =>
+        {
+            while (true)
+            {
+                try
+                {
+                    if (!_quitSignal.WaitOne()) continue;
+                }
+                catch (ObjectDisposedException)
+                {
+                    return;
+                }
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!_startupCompleted)
+                    {
+                        // 启动还没完成就被要求退出：直接收摊，别把半截界面留给用户
+                        Shutdown();
+                        return;
+                    }
+                    ExitApp();
+                }));
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "quit-listener",
+        };
+        _quitListener.Start();
+    }
+
+    /// <summary>向已在运行的实例发退出信号；没有在运行就安静返回。</summary>
+    private static void SignalExistingInstanceToQuit()
+    {
+        try
+        {
+            using var handle = EventWaitHandle.OpenExisting(QuitSignalName);
+            handle.Set();
+        }
+        catch
+        {
+            // 没有在运行的实例：这次调用本就无事可做
+        }
+    }
+
+    // 后台预热图标缓存：启动后先把各盒子的图标提取好，用户点盒子时面板能秒开
+    private async Task PrefetchIconsAsync()    {
         await Task.Delay(1000);
         foreach (var box in Config.Boxes)
         {
@@ -359,6 +440,23 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// 托盘「检查更新」。查询、下载、拉起安装包都由 UpdateWindow 负责；
+    /// 只有安装包真的起来了才退出本进程——因为安装包要替换的正是正在运行的 exe。
+    /// 盒子的数据目录与 config.json 都在安装包的覆盖范围之外，不受影响。
+    /// </summary>
+    private void OpenUpdate()
+    {
+        var dlg = new UpdateWindow(Config, Store);
+        dlg.ShowDialog();
+
+        if (!dlg.InstallerLaunched) return;
+
+        // 退出前再落一次盘，避免安装包立刻结束进程时丢掉最后一次改动
+        Store.Save(Config);
+        ExitApp();
+    }
+
     private void ExitApp()
     {
         foreach (var w in _boxWindows.ToList())
@@ -372,6 +470,7 @@ public partial class App : Application
         ThemeService.Shutdown();
         _tray?.Dispose();
         AppIconService.Shutdown();
+        _quitSignal?.Dispose();
         _mutex?.Dispose();
         base.OnExit(e);
     }

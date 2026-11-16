@@ -1,0 +1,80 @@
+name: Release
+
+# 推 tag 即发版：
+#   git tag v0.2.1 && git push origin v0.2.1
+# 产物：dist/ToniaDeskBox-Setup-<版本>.exe，作为 Release 资产上传。
+# 程序内「检查更新」读的就是这条 Release，所以版本号必须来自 tag。
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（不带 v），例如 0.2.1'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 解析版本号
+        id: ver
+        shell: pwsh
+        run: |
+          if ('${{ github.event_name }}' -eq 'workflow_dispatch') {
+            $v = '${{ inputs.version }}'
+          } else {
+            $v = '${{ github.ref_name }}' -replace '^v', ''
+          }
+          if ($v -notmatch '^\d+\.\d+\.\d+') { throw "版本号格式不对：$v" }
+          "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Host "版本：$v"
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: 发布 self-contained 单文件
+        shell: pwsh
+        run: |
+          dotnet publish src/ToniaDeskBox/ToniaDeskBox.csproj `
+            -c Release -r win-x64 --self-contained true `
+            -p:Version=${{ steps.ver.outputs.version }} `
+            -o publish
+
+      - name: 安装 Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: 编译安装包
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" 'installer\ToniaDeskBox.iss'
+          if ($LASTEXITCODE -ne 0) { throw "ISCC 编译失败：$LASTEXITCODE" }
+
+      - name: 校验安装包存在
+        shell: pwsh
+        run: |
+          $setup = "dist\ToniaDeskBox-Setup-${{ steps.ver.outputs.version }}.exe"
+          if (-not (Test-Path $setup)) { throw "没有生成 $setup" }
+          "产物：$setup（{0:N1} MB）" -f ((Get-Item $setup).Length / 1MB)
+
+      - name: 创建 Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "v${{ steps.ver.outputs.version }}"
+          $setup = "dist\ToniaDeskBox-Setup-${{ steps.ver.outputs.version }}.exe"
+          gh release create $tag $setup `
+            --title "Tonia-DeskBox $tag" `
+            --generate-notes `
+            --notes "安装包：下载下方 ToniaDeskBox-Setup-*.exe，双击覆盖安装即可。
+          程序内的「检查更新…」会自动找到这一版。盒子文件与设置不受安装影响。"

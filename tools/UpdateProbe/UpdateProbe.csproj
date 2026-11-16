@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- 开发期小工具：直接调用程序里的 UpdateService，验证「检查更新」的网络与解析逻辑。
+       不参与打包，也不影响安装包产物。-->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>UpdateProbe</AssemblyName>
+    <RootNamespace>ToniaDeskBox.Tools</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ToniaDeskBox\ToniaDeskBox.csproj" />
+  </ItemGroup>
+
+</Project>
