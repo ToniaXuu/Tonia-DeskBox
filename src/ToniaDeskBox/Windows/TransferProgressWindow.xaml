@@ -1,0 +1,159 @@
+<Window x:Class="ToniaDeskBox.Windows.TransferProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="备份操作"
+        Icon="{DynamicResource AppIcon}"
+        Width="440"
+        SizeToContent="Height"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterScreen"
+        FontFamily="Microsoft YaHei UI"
+        FontSize="13">
+    <!-- 与「盒子设置」「全局设置」共用同一套 Theme.* 笔刷 -->
+    <Grid Margin="24">
+        <Border x:Name="ShadowCaster" CornerRadius="14"
+                Background="{DynamicResource Theme.ShadowFill}">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="18" ShadowDepth="3" Opacity="0.45"/>
+            </Border.Effect>
+        </Border>
+
+        <Border x:Name="ChromeBorder"
+                Background="{DynamicResource Theme.Surface}"
+                BorderBrush="{DynamicResource Theme.Border}"
+                BorderThickness="1"
+                CornerRadius="14">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <Rectangle Grid.RowSpan="2" Height="2" VerticalAlignment="Top"
+                           Margin="10,0,10,0" RadiusX="1" RadiusY="1"
+                           Fill="{DynamicResource Theme.Accent}"
+                           IsHitTestVisible="False"/>
+
+                <Border x:Name="TitleBar" Grid.Row="0"
+                        Background="{DynamicResource Theme.TitleBar}" CornerRadius="13,13,0,0"
+                        MouseLeftButtonDown="OnTitleBarMouseDown">
+                    <Grid Height="42">
+                        <StackPanel Orientation="Horizontal" Margin="14,0,0,0" VerticalAlignment="Center">
+                            <Ellipse Width="6" Height="6" Margin="0,0,8,0"
+                                     Fill="{DynamicResource Theme.Accent}"/>
+                            <Image Source="{DynamicResource AppIcon}" Width="18" Height="18"/>
+                            <TextBlock x:Name="TitleText" Text="导出备份" Foreground="{DynamicResource Theme.Text}"
+                                       FontWeight="SemiBold" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <Button x:Name="CloseBtn" Width="30" Height="30"
+                                HorizontalAlignment="Right" VerticalAlignment="Center"
+                                Margin="0,0,8,0" Click="OnCloseClick" Cursor="Hand"
+                                ToolTip="关闭">
+                            <Button.Template>
+                                <ControlTemplate TargetType="Button">
+                                    <Border x:Name="Bd" Background="Transparent" CornerRadius="6">
+                                        <Path Data="M 0,0 L 9,9 M 9,0 L 0,9"
+                                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.4"
+                                              HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <ControlTemplate.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Danger}"/>
+                                        </Trigger>
+                                    </ControlTemplate.Triggers>
+                                </ControlTemplate>
+                            </Button.Template>
+                        </Button>
+                    </Grid>
+                </Border>
+
+                <Grid Grid.Row="1" Margin="20,16,20,18">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <StackPanel Grid.Row="0" Orientation="Horizontal">
+                        <TextBlock x:Name="StateText" Text="正在准备…"
+                                   Foreground="{DynamicResource Theme.Text}"
+                                   FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="DetailText" Margin="10,0,0,0"
+                                   Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
+                                   VerticalAlignment="Center"/>
+                    </StackPanel>
+
+                    <ProgressBar x:Name="Bar" Grid.Row="1" Height="6" Margin="0,14,0,0"
+                                 Minimum="0" Maximum="100" Value="0"
+                                 BorderThickness="0" Background="Transparent">
+                        <ProgressBar.Template>
+                            <ControlTemplate TargetType="ProgressBar">
+                                <!-- 自定义模板不会自动带不定态动画：统计阶段必须自己跑一个光带，
+                                     否则 PART_Indicator 会被画成 100%，看起来像已经导出完了 -->
+                                <Grid ClipToBounds="True">
+                                    <Border Background="{DynamicResource Theme.Fill}" CornerRadius="3"/>
+                                    <Border x:Name="PART_Track"/>
+                                    <Border x:Name="PART_Indicator" HorizontalAlignment="Left"
+                                            Background="{DynamicResource Theme.Accent}" CornerRadius="3"/>
+                                    <Border x:Name="PART_GlowRect" Width="110" HorizontalAlignment="Left"
+                                            CornerRadius="3" Opacity="0"
+                                            Background="{DynamicResource Theme.Accent}">
+                                        <Border.RenderTransform>
+                                            <TranslateTransform X="-110"/>
+                                        </Border.RenderTransform>
+                                    </Border>
+                                </Grid>
+                                <ControlTemplate.Triggers>
+                                    <Trigger Property="IsIndeterminate" Value="True">
+                                        <Setter TargetName="PART_Indicator" Property="Visibility" Value="Collapsed"/>
+                                        <Setter TargetName="PART_GlowRect" Property="Opacity" Value="0.85"/>
+                                        <Trigger.EnterActions>
+                                            <BeginStoryboard x:Name="GlowStoryboard">
+                                                <Storyboard RepeatBehavior="Forever">
+                                                    <DoubleAnimation
+                                                        Storyboard.TargetName="PART_GlowRect"
+                                                        Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)"
+                                                        From="-110" To="420" Duration="0:0:1.15"/>
+                                                </Storyboard>
+                                            </BeginStoryboard>
+                                        </Trigger.EnterActions>
+                                        <Trigger.ExitActions>
+                                            <StopStoryboard BeginStoryboardName="GlowStoryboard"/>
+                                        </Trigger.ExitActions>
+                                    </Trigger>
+                                </ControlTemplate.Triggers>
+                            </ControlTemplate>
+                        </ProgressBar.Template>
+                    </ProgressBar>
+
+                    <TextBlock x:Name="CurrentText" Grid.Row="2" Margin="0,11,0,0"
+                               Foreground="{DynamicResource Theme.TextSecondary}" FontSize="11"
+                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+
+                    <TextBlock x:Name="TargetText" Grid.Row="3" Margin="0,6,0,0"
+                               Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
+                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+
+                    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right"
+                                Margin="0,15,0,0">
+                        <Button x:Name="OpenFolderBtn" Content="打开所在文件夹"
+                                Style="{StaticResource GhostButton}" Height="34" Padding="14,0"
+                                Margin="0,0,10,0" Visibility="Collapsed" Click="OnOpenFolderClick"/>
+                        <Button x:Name="CancelBtn" Content="取消"
+                                Style="{StaticResource GhostButton}" Width="88" Height="34"
+                                Click="OnCancelClick"/>
+                        <Button x:Name="DoneBtn" Content="完成"
+                                Style="{StaticResource AccentButton}" Width="88" Height="34"
+                                IsDefault="True" Visibility="Collapsed" Click="OnDoneClick"/>
+                    </StackPanel>
+                </Grid>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

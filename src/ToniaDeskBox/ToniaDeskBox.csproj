@@ -16,7 +16,7 @@
          程序内「关于」三处必须一致，改版本只需改这一行 + installer 里的同名默认值。
          AssemblyVersion / FileVersion / InformationalVersion 全部由它推导，
          这样 CI 用 -p:Version=x.y.z 注入时，文件属性也会跟着变。 -->
-    <Version>0.2.0</Version>
+    <Version>0.2.1</Version>
     <Product>Tonia-DeskBox</Product>
     <AssemblyTitle>Tonia-DeskBox</AssemblyTitle>
     <Description>桌面盒子整理工具</Description>
