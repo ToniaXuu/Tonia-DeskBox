@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <!-- 被引用的主工程是 WPF 应用，测试进程必须能解析 WindowsDesktop 框架 -->
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!-- 这里刻意不引任何测试框架：主工程至今零第三方 NuGet 依赖，
+         测试不该成为第一个例外（也让 CI 不必联网还原）。 -->
+    <AssemblyName>ToniaDeskBox.Tests</AssemblyName>
+    <RootNamespace>ToniaDeskBox.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ToniaDeskBox\ToniaDeskBox.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <!-- 主工程在 Release 下是自包含的（见主 csproj），而自包含的可执行文件
+         不能被非自包含项目引用（NETSDK1151）。测试工程跟着同一个 RID 自包含即可。
+         这只影响本地 `dotnet build -c Release`，CI 的 release.yml 只 publish 主工程。 -->
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+</Project>

@@ -7,7 +7,6 @@ using Microsoft.Win32;
 using ToniaDeskBox.Models;
 using ToniaDeskBox.Services;
 using ToniaDeskBox.Windows;
-using WF = System.Windows.Forms;
 
 namespace ToniaDeskBox;
 
@@ -24,6 +23,7 @@ public partial class App : Application
     private EventWaitHandle? _quitSignal;
     private Thread? _quitListener;
     private TrayService? _tray;
+    private HotkeyService? _hotkeys;
     private AppearanceTheme? _appTheme;
     private readonly List<BoxWindow> _boxWindows = new();
     private DispatcherTimer? _healTimer;
@@ -76,6 +76,7 @@ public partial class App : Application
 
         _tray = new TrayService(Config, () => Store.DataRoot, Config.Settings.Autorun || AutoStartService.IsEnabled());
         WireTray();
+        SetupHotkeys();
 
         // 首启口径：ConfigStore.Load() 在无配置时产出 1 个空盒（需求 §12 验收清单）。
         // 曾经在这里按 Boxes.Count==0 追加"系统工具/办公工具"并自动排列，但 Load() 已先落盘，
@@ -162,8 +163,10 @@ public partial class App : Application
     {
         if (_tray == null) return;
         _tray.NewBoxRequested += CreateBox;
+        _tray.MapFolderRequested += MapFolder;
         _tray.ShowAllRequested += ShowAll;
         _tray.HideAllRequested += HideAll;
+        _tray.TidyRequested += TidyDesktop;
         _tray.AutoSortRequested += AutoSortBoxes;
         _tray.AutoStartToggled += OnAutoStartToggled;
         _tray.GlobalSettingsRequested += OpenGlobalSettings;
@@ -173,14 +176,78 @@ public partial class App : Application
         _tray.ExitRequested += ExitApp;
     }
 
+    // ---------- 全局热键 ----------
+
+    /// <summary>
+    /// 建立热键通道。键位来自配置：呼出默认 Ctrl+Alt+D（与托盘双击同一套动作），
+    /// 隐藏默认不占用键位。注册失败最常见的原因是键位被别的程序占了 —— 写日志，
+    /// 用户可以在全局设置里换一个，并在设置窗口里看到明确失败原因。
+    /// </summary>
+    private void SetupHotkeys()
+    {
+        _hotkeys ??= new HotkeyService();
+        _hotkeys.ShowRequested -= ShowAllAndFront;
+        _hotkeys.HideRequested -= HideAll;
+        _hotkeys.ShowRequested += ShowAllAndFront;
+        _hotkeys.HideRequested += HideAll;
+        ApplyHotkeys(reportToUser: false);
+    }
+
+    /// <summary>把配置里的键位应用到系统。返回注册失败原因（空串表示成功）。</summary>
+    public string ApplyHotkeys(bool reportToUser)
+    {
+        if (_hotkeys == null) return "";
+        var error = _hotkeys.Apply(Config.Settings.Hotkey, Config.Settings.HideHotkey);
+        if (error.Length > 0)
+        {
+            Store.Log($"热键注册失败：{error}");
+            if (reportToUser)
+                MessageBox.Show(error, "全局热键", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+        return error;
+    }
+
+    public string CurrentShowHotkey => _hotkeys?.ShowHotkey ?? "";
+    public string CurrentHideHotkey => _hotkeys?.HideHotkey ?? "";
+
+    /// <summary>呼出全部盒子并提到桌面层最前。托盘双击与热键共用。</summary>
+    private void ShowAllAndFront()
+    {
+        foreach (var w in _boxWindows.ToList())
+        {
+            if (!w.IsLoaded) continue;
+            if (w.Box.Hidden) w.SetVisible(true);
+        }
+        // 逐窗提层放在显示之后：刚 Show 的窗口此刻才拿到有效 HWND
+        foreach (var w in _boxWindows.ToList())
+            w.BringToFront();
+    }
+
     // 后台预热图标缓存：启动后先把各盒子的图标提取好，用户点盒子时面板能秒开
-    private async Task PrefetchIconsAsync()    {
+    private async Task PrefetchIconsAsync()
+    {
         await Task.Delay(1000);
         foreach (var box in Config.Boxes)
         {
-            var dir = Store.BoxDir(box);
+            string dir;
+            try { dir = Store.SourceDir(box); }
+            catch { continue; }
             if (!Directory.Exists(dir)) continue;
-            foreach (var file in Directory.EnumerateFileSystemEntries(dir))
+
+            // 映射盒可能指向一个几百项的目录：预热只取前 60 个，
+            // 别为了"秒开"把启动阶段的 IO 拖长
+            List<string> entries;
+            try
+            {
+                var limit = box.Kind == BoxKind.Portal ? 60 : 400;
+                entries = Directory.EnumerateFileSystemEntries(dir).Take(limit).ToList();
+            }
+            catch
+            {
+                continue;   // 网络盘 / 无权限：跳过，点开面板时再按需提取
+            }
+
+            foreach (var file in entries)
             {
                 try { await IconService.GetAsync(file); }
                 catch { }
@@ -222,12 +289,10 @@ public partial class App : Application
         var wins = _boxWindows.Where(w => w.IsLoaded && w.ActualWidth > 0).ToList();
         if (wins.Count == 0) return;
 
-        var screen = WF.Screen.PrimaryScreen;
-        if (screen == null) return;
-        var wa = screen.WorkingArea;
+        var wa = ScreenUtil.PrimaryWorkAreaPx();
         double dpi = VisualTreeHelper.GetDpi(wins[0]).PixelsPerDip;
         double totalW = wins.Sum(w => w.ActualWidth);
-        double x = wa.Left / dpi + (wa.Width / dpi - totalW) / 2;
+        double x = wa.X / dpi + (wa.Width / dpi - totalW) / 2;
         double bottom = wa.Bottom / dpi;
 
         foreach (var w in wins)
@@ -339,17 +404,166 @@ public partial class App : Application
             name = $"新建盒子{i}";
 
         var box = new BoxConfig { Name = name };
-        if (Config.Settings.Global is { } g)
-        {
-            box.Opacity = g.Opacity;
-            box.BackColor = g.BackColor;
-            box.Rounded = g.Rounded;
-            box.CornerSize = g.CornerSize;
-            box.Topmost = g.Topmost;
-        }
+        ApplyBoxDefaults(box);
+        PlaceNewBox(box);
         Config.Boxes.Add(box);
         Store.Save(Config);
         ShowBox(box);
+    }
+
+    /// <summary>新盒子继承全局默认外观（没配过全局设置就用模型默认值）。</summary>
+    private void ApplyBoxDefaults(BoxConfig box)
+    {
+        if (Config.Settings.Global is not { } g) return;
+        box.Opacity = g.Opacity;
+        box.BackColor = g.BackColor;
+        box.Rounded = g.Rounded;
+        box.CornerSize = g.CornerSize;
+        box.Topmost = g.Topmost;
+    }
+
+    /// <summary>把新盒子错开摆放，避免完全叠在一起；出界就拉回工作区。</summary>
+    private void PlaceNewBox(BoxConfig box)
+    {
+        int n = Config.Boxes.Count;
+        box.X = 120 + n * 26;
+        box.Y = 120 + n * 20;
+        ClampIntoWorkArea(box);
+    }
+
+    // ---------- 文件夹映射（Folder Portal） ----------
+
+    /// <summary>
+    /// 创建一个"映射盒"：盒子里显示的是某个已有目录的内容，文件一个都不搬。
+    /// 这是本项目从「只能搬」到「也能镜像」的关键一步 —— 以前把 D:\项目\xxx 拖进来
+    /// 等于真搬家，IDE 里的路径全失效，所以用户只敢收纳快捷方式。
+    /// </summary>
+    private void MapFolder()
+    {
+        var dlg = new OpenFolderDialog
+        {
+            Title = "选择要映射到桌面的文件夹（文件仍留在原位置）",
+            Multiselect = false,
+        };
+        if (dlg.ShowDialog() != true) return;
+
+        string folder;
+        try { folder = Path.GetFullPath(dlg.FolderName); }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"路径无效：{ex.Message}", "映射文件夹", MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
+        // 同一目录映射两次 = 桌面上两个窗看同一堆文件，只会让人困惑
+        var dup = Config.Boxes.FirstOrDefault(b =>
+            ConfigStore.IsPortal(b) && SamePath(b.PortalPath, folder));
+        if (dup != null)
+        {
+            MessageBox.Show($"这个文件夹已经映射为盒子“{dup.Name}”。", "映射文件夹",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        CreatePortalBox(folder);
+    }
+
+    private static bool SamePath(string? a, string b)
+    {
+        if (string.IsNullOrWhiteSpace(a)) return false;
+        try
+        {
+            return string.Equals(Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar),
+                b.TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private BoxConfig CreatePortalBox(string folder)
+    {
+        var seedName = Path.GetFileName(folder.TrimEnd(Path.DirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(seedName)) seedName = "映射文件夹";
+
+        var box = new BoxConfig
+        {
+            Name = DesktopTidyService.UniqueBoxName(seedName, Config.Boxes.Select(b => b.Name)),
+            Kind = BoxKind.Portal,
+            PortalPath = folder,
+            // 映射盒默认展开一点：让人一建出来就看见文件夹里有什么
+            W = 340,
+        };
+        ApplyBoxDefaults(box);
+        PlaceNewBox(box);
+        Config.Boxes.Add(box);
+        Store.Save(Config);
+        ShowBox(box);
+        Store.Log($"新建映射盒：{box.Name} -> {folder}");
+        return box;
+    }
+
+    // ---------- 一键整理 ----------
+
+    /// <summary>
+    /// 托盘「一键整理桌面…」：扫桌面 → 预览勾选 → 批量搬进按分类命名的盒子。
+    /// 预览这一步就是试运行，点确认之前不动任何文件。
+    /// </summary>
+    private void TidyDesktop()
+    {
+        // 数据根 / 配置目录可能就在桌面上（绿色版），不能把自己搬进自己
+        var groups = DesktopTidyService.Scan(
+            DesktopTidyService.DesktopDir(), new[] { Store.DataRoot, Store.ConfigDir });
+
+        var dlg = new TidyPreviewWindow(groups, Store, Config, EnsureBox);
+        dlg.ShowDialog();
+        if (!dlg.Applied) return;
+
+        RefreshAfterTidy();
+
+        if (dlg.Result is not { } result) return;
+        var lines = new List<string> { $"已整理 {result.Moved} 项到对应的盒子。" };
+        if (result.Skipped > 0) lines.Add($"{result.Skipped} 项因盒内已有同名条目跳过。");
+        if (result.Failed > 0) lines.Add($"{result.Failed} 项移动失败，原文件仍在桌面。");
+
+        var detail = result.Problems.Count > 0
+            ? "\n\n" + string.Join("\n", result.Problems.Take(6)) +
+              (result.Problems.Count > 6 ? $"\n…等 {result.Problems.Count} 条" : "")
+            : "";
+
+        MessageBox.Show(string.Join("\n", lines) + detail, "一键整理",
+            MessageBoxButton.OK,
+            result.Failed > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+    }
+
+    /// <summary>整理结束后刷新全部盒子的角标、缩略图与已打开的面板。</summary>
+    public void RefreshAfterTidy()
+    {
+        foreach (var w in _boxWindows.ToList())
+            w.ApplySettings();
+    }
+
+    /// <summary>
+    /// 一键整理的目标盒子：同名（非映射盒）直接复用，否则新建。
+    /// 重复整理不会越堆越多 —— 第二次点「一键整理」还是落进那几个盒子。
+    /// </summary>
+    public BoxConfig EnsureBox(string name)
+    {
+        var existing = Config.Boxes.FirstOrDefault(b =>
+            !ConfigStore.IsPortal(b) && string.Equals(b.Name, name, StringComparison.OrdinalIgnoreCase));
+        if (existing != null) return existing;
+
+        var box = new BoxConfig
+        {
+            Name = DesktopTidyService.UniqueBoxName(name, Config.Boxes.Select(b => b.Name)),
+        };
+        ApplyBoxDefaults(box);
+        PlaceNewBox(box);
+        Config.Boxes.Add(box);
+        Store.Save(Config);   // 先落盘：万一后续搬运中断，盒子结构不会丢
+        ShowBox(box);
+        return box;
     }
 
     private void OpenGlobalSettings()
@@ -765,6 +979,9 @@ public partial class App : Application
             Config.Settings.Autorun || AutoStartService.IsEnabled());
         WireTray();
 
+        // 备份里可能带一套不同的热键配置，重新注册一次
+        ApplyHotkeys(reportToUser: false);
+
         RebuildBoxWindows();
 
         LogError($"导入完成：{applied.Boxes} 个盒子，数据根 {applied.DataRoot}，" +
@@ -811,6 +1028,7 @@ public partial class App : Application
     {
         ThemeService.Changed -= OnThemeChanged;
         ThemeService.Shutdown();
+        _hotkeys?.Dispose();
         _tray?.Dispose();
         AppIconService.Shutdown();
         _quitSignal?.Dispose();

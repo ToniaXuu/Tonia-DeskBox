@@ -114,12 +114,87 @@ public sealed class AppearanceTheme
         return theme;
     }
 
-    /// <summary>右键菜单跟随所属盒子的外观，而不是应用默认深色。</summary>
-    public static AppearanceTheme AttachMenu(ContextMenu menu, BoxConfig box)
+    /// <summary>
+    /// 右键菜单跟随所属盒子的外观，而不是应用默认深色。
+    /// 菜单的不透明度独立于盒子（<c>AppSettings.MenuOpacity</c>）：文字密集的浮层要更实。
+    /// </summary>
+    public static AppearanceTheme AttachMenu(ContextMenu menu, BoxConfig box,
+        double minAlpha = 0, Window? owner = null)
     {
         var theme = Attach(menu);
-        theme.Update(box);
+        theme.Update(box, minAlpha);
+        WatchMenuOverlap(menu, box, minAlpha, owner);
         return theme;
+    }
+
+    /// <summary>
+    /// 菜单压住别的卡片时抬成全不透明。
+    /// 两层半透明叠在一起，底下的字会从菜单里透出来，两边都读不清。
+    /// 只排除菜单所属的盒子：菜单本来就该盖在它上面。
+    /// </summary>
+    private static void WatchMenuOverlap(ContextMenu menu, BoxConfig box, double minAlpha, Window? owner)
+    {
+        void Check(int attempt)
+        {
+            // Opened 时还没排版；个别情况下弹层的位置/尺寸要等一两轮才定稿，
+            // 量到 0 就再等一轮，避免"第一次打开菜单没变实"。
+            menu.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, new Action(() =>
+            {
+                if (menu.ActualWidth <= 0 && attempt < 3)
+                {
+                    Check(attempt + 1);
+                    return;
+                }
+                if (!OverlapsOtherCard(menu, owner)) return;
+                Attach(menu).Update(box, 1.0);
+            }));
+        }
+
+        menu.Opened += (_, _) => Check(0);
+    }
+
+    /// <summary>菜单（或任意元素）是否与别的卡片/面板在屏幕上有实质重叠。</summary>
+    public static bool OverlapsOtherCard(FrameworkElement element, Window? exclude = null)
+    {
+        try
+        {
+            if (!element.IsVisible || element.ActualWidth <= 0 || element.ActualHeight <= 0) return false;
+
+            double dpi = VisualTreeHelper.GetDpi(element).DpiScaleX;
+            if (dpi <= 0) dpi = 1;
+
+            // 菜单在 Popup 自己的 HWND 里：PointToScreen 拿到的是那个 HWND 的客户区坐标，
+            // 不含弹层在屏幕上的偏移，直接问窗口矩形才准。
+            Rect self;
+            if (PresentationSource.FromVisual(element) is System.Windows.Interop.HwndSource src
+                && src.Handle != IntPtr.Zero
+                && ScreenUtil.WindowRectPx(src.Handle) is { } px)
+            {
+                self = new Rect(px.X / dpi, px.Y / dpi, px.Width / dpi, px.Height / dpi);
+            }
+            else
+            {
+                var origin = element.PointToScreen(new Point(0, 0));
+                self = new Rect(origin.X / dpi, origin.Y / dpi,
+                    element.ActualWidth, element.ActualHeight);
+            }
+
+            foreach (Window win in Application.Current.Windows)
+            {
+                if (!win.IsVisible || ReferenceEquals(win, exclude)) continue;
+                if (win.WindowState == WindowState.Minimized) continue;
+
+                var other = new Rect(win.Left, win.Top, win.ActualWidth, win.ActualHeight);
+                var hit = Rect.Intersect(self, other);
+                // 只擦到几个像素（圆角、阴影贴边）不算重叠
+                if (!hit.IsEmpty && hit.Width > 6 && hit.Height > 6) return true;
+            }
+        }
+        catch
+        {
+            // 跨 DPI / 窗口正在销毁时 PointToScreen 可能抛，宁可保持原样
+        }
+        return false;
     }
 
     public AppearanceTheme Update(BoxConfig box, double minAlpha = 0) =>

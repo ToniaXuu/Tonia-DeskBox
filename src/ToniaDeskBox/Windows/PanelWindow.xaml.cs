@@ -12,9 +12,19 @@ using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using ToniaDeskBox.Models;
 using ToniaDeskBox.Services;
-using WF = System.Windows.Forms;
 
 namespace ToniaDeskBox.Windows;
+
+/// <summary>
+/// 面板的打开方式。
+/// - Browse：完整面板（标题 + 网格 + 底部提示），点盒子空白处打开；
+/// - Search：只做搜索用的小面板，由折叠态盒子上的放大镜打开，搜索栏常驻。
+/// </summary>
+public enum PanelOpenMode
+{
+    Browse = 0,
+    Search = 1,
+}
 
 public partial class PanelWindow : Window
 {
@@ -65,6 +75,10 @@ public partial class PanelWindow : Window
     private string _filterText = "";
     private SortMode _sortMode = SortMode.None;
     private bool _searchOpen;
+    private readonly PanelOpenMode _openMode;
+    // 被别的卡片压住时把表面调成全不透明；记一个状态位，避免每 200ms 重刷笔刷
+    private bool _opaqueForOverlap;
+    private DispatcherTimer? _overlapTimer;
     private ContextMenu? _openMenu;
     private bool _suppressDeactivate;
 
@@ -95,7 +109,8 @@ public partial class PanelWindow : Window
     // 从面板内拖出文件期间，不要把面板自己的 DragOver 当成外部拖入
     private bool _internalDrag;
 
-    public PanelWindow(BoxWindow owner, BoxConfig box, AppConfig config, ConfigStore store)
+    public PanelWindow(BoxWindow owner, BoxConfig box, AppConfig config, ConfigStore store,
+        PanelOpenMode mode = PanelOpenMode.Browse)
     {
         InitializeComponent();
         // 必须在 InitializeComponent() 之后挂：XAML 有自己的 Window.Resources，
@@ -105,6 +120,7 @@ public partial class PanelWindow : Window
         _box = box;
         _config = config;
         _store = store;
+        _openMode = mode;
 
         PanelTitle.Text = box.Name;
         ApplyTheme();
@@ -139,14 +155,85 @@ public partial class PanelWindow : Window
             UpdatePlacement();
         };
 
+        if (_openMode == PanelOpenMode.Search)
+        {
+            // 搜索态面板只干一件事：找东西。放大镜与「更多」在这里是冗余的，
+            // 底部那条"拖入收纳"提示也不是搜索场景的文案
+            SearchButton.Visibility = Visibility.Collapsed;
+            MoreButton.Visibility = Visibility.Collapsed;
+            FooterHint.Visibility = Visibility.Collapsed;
+            SearchBar.Visibility = Visibility.Visible;
+            _searchOpen = true;
+        }
+
         ContentRendered += (_, _) =>
         {
             // SizeToContent 下实际尺寸此时才定稿，再校一次位置（此时内容仍不可见）
             UpdatePlacement();
             PlayOpenAnimation();
+
+            UpdateOverlapOpacity();
+
+            // 键盘焦点必须等首帧画完再抢：提前 Focus 会被窗口激活流程盖掉
+            if (_openMode == PanelOpenMode.Search)
+            {
+                SearchBox.Focus();
+                QueuePlacement();
+            }
         };
 
         UpdatePlacement();
+        StartOverlapWatch();
+    }
+
+    /// <summary>
+    /// 面板与别的卡片重叠时转成不透明。
+    ///
+    /// 用定时器而不是事件：盒子可以被拖到任意位置、别的面板也可能挪过来，
+    /// 逐个订阅各窗口的 LocationChanged 覆盖面还不如每 200ms 量一次矩形来得可靠，
+    /// 而且这里只是几次 Rect 求交，代价可以忽略。
+    /// </summary>
+    private void StartOverlapWatch()
+    {
+        _overlapTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(200),
+        };
+        _overlapTimer.Tick += (_, _) => UpdateOverlapOpacity();
+        _overlapTimer.Start();
+        Closed += (_, _) => _overlapTimer?.Stop();
+    }
+
+    private void UpdateOverlapOpacity()
+    {
+        bool overlap = OverlapsOtherWindow();
+        if (overlap == _opaqueForOverlap) return;
+        _opaqueForOverlap = overlap;
+        ApplyTheme();
+    }
+
+    private bool OverlapsOtherWindow()
+    {
+        if (!IsLoaded || !IsVisible) return false;
+
+        // 外圈 18px 是留给投影的透明边，被它擦到不算"压住"
+        const double margin = 18;
+        double w = ActualWidth - margin * 2;
+        double h = ActualHeight - margin * 2;
+        if (w <= 0 || h <= 0) return false;
+        var self = new Rect(Left + margin, Top + margin, w, h);
+
+        foreach (Window win in Application.Current.Windows)
+        {
+            if (ReferenceEquals(win, this) || !win.IsVisible) continue;
+            if (win.WindowState == WindowState.Minimized) continue;
+
+            var other = new Rect(win.Left, win.Top, win.ActualWidth, win.ActualHeight);
+            var hit = Rect.Intersect(self, other);
+            // 只压住几像素（圆角、阴影贴边）不该让面板突然变实
+            if (!hit.IsEmpty && hit.Width > 6 && hit.Height > 6) return true;
+        }
+        return false;
     }
 
     private void ApplyTheme()
@@ -154,7 +241,8 @@ public partial class PanelWindow : Window
         // 与盒子共用同一套 Theme.* 笔刷：白底自动切深色前景。
         // 分类色也走 Theme.Accent（每次 Update 换新笔刷对象），
         // 不再原地改 XAML 资源里的 brush —— 它可能已被 WPF 冻结。
-        _theme.Update(_box);
+        // 被压住时抬到全不透明：两层半透明叠在一起，谁的字都读不清
+        _theme.Update(_box, _opaqueForOverlap ? 1.0 : 0);
 
         double r = _box.Rounded ? Math.Clamp(_box.CornerSize + 2, 10, 18) : 2;
         Root.CornerRadius = new CornerRadius(r);
@@ -267,19 +355,38 @@ public partial class PanelWindow : Window
         if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
         if (e.Data.GetData(DataFormats.FileDrop) is not string[] paths || paths.Length == 0) return;
 
-        var dir = _store.BoxDir(_box);
-        Directory.CreateDirectory(dir);
-        foreach (var src in paths)
+        var dir = _store.SourceDir(_box);
+        if (ConfigStore.IsPortal(_box))
         {
-            var name = Path.GetFileName(src);
-            if (string.IsNullOrEmpty(name)) continue;
-            var target = Path.Combine(dir, name);
-            if (FileMover.ExistsConflict(target)) continue;
-            try { FileMover.MoveTo(src, target); }
-            catch { }
+            // 映射盒写的是别人的目录：不替它创建，路径不在就直说
+            if (!Directory.Exists(dir))
+            {
+                ShowMsg($"映射的文件夹当前不可用：\n{dir}");
+                e.Handled = true;
+                return;
+            }
+        }
+        else
+        {
+            Directory.CreateDirectory(dir);
+        }
+
+        // 自己搬自己：watcher 收到的事件不该反过来重建列表
+        using (_owner.SuppressWatcher())
+        {
+            foreach (var src in paths)
+            {
+                var name = Path.GetFileName(src);
+                if (string.IsNullOrEmpty(name)) continue;
+                var target = Path.Combine(dir, name);
+                if (FileMover.ExistsConflict(target)) continue;
+                try { FileMover.MoveTo(src, target); }
+                catch { }
+            }
         }
         _store.Save(_config);
         RefreshItems();
+        // 拖入后条数变了，这条必须无条件刷
         _owner.RefreshBadge();
         e.Handled = true;
     }
@@ -296,9 +403,9 @@ public partial class PanelWindow : Window
         if (w <= 0 || h <= 0 || !_owner.IsLoaded) return;
 
         var hwnd = new WindowInteropHelper(_owner).Handle;
-        var wa = WF.Screen.FromHandle(hwnd).WorkingArea;
+        var wa = ScreenUtil.WorkAreaPx(hwnd);
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
-        double waL = wa.Left / dpi, waT = wa.Top / dpi;
+        double waL = wa.X / dpi, waT = wa.Y / dpi;
         double waR = wa.Right / dpi, waB = wa.Bottom / dpi;
         const double M = 18; // 窗口外圈投影边距
 
@@ -326,7 +433,7 @@ public partial class PanelWindow : Window
 
     public void RefreshItems(bool animate = true)
     {
-        var dir = _store.BoxDir(_box);
+        var dir = _store.SourceDir(_box);
         var names = Directory.Exists(dir)
             ? Directory.EnumerateFileSystemEntries(dir)
                 .Select(Path.GetFileName)
@@ -358,10 +465,23 @@ public partial class PanelWindow : Window
 
         // 宽度基线只在「重新扫描目录」时确定。搜索过滤时刻意不动它，
         // 否则每敲一个字面板就变宽变窄一次，位置也跟着重算，视觉上很晃。
-        BandHost.Width = _allItems.Count <= 2 ? 206 : _allItems.Count <= 6 ? 300 : 400;
+        // 宽度必须是「列数 × 单元格宽(96)」的整数倍：206/300/400 这类整数
+        // 会多出十几像素全堆在右侧，最后一行看起来就是左对齐、右边空一块。
+        BandHost.Width = ColumnsFor(_allItems.Count) * 96;
 
         BindVisible(animate);
     }
+
+    /// <summary>按数量选一个不出现「3+1」这种残行的列数。</summary>
+    private static int ColumnsFor(int count) => count switch
+    {
+        <= 1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 2,      // 2×2 比 3+1 稳
+        <= 6 => 3,
+        _ => 4,
+    };
 
     /// <summary>
     /// 按当前关键字把 <see cref="_allItems"/> 过滤成 <see cref="_items"/> 并绑定。
@@ -397,7 +517,9 @@ public partial class PanelWindow : Window
         DropSlot.Visibility = showSlot ? Visibility.Visible : Visibility.Collapsed;
         if (showSlot) DropSlot.Margin = new Thickness(96, 4, 0, 0);
 
-        _owner.RefreshBadge();
+        // 只有「没在筛选」时才刷盒子：搜索时总条数没变，
+        // 每敲一个字都去重扫目录、重建缩略图没有意义（大目录会明显卡）
+        if (key.Length == 0) _owner.RefreshBadge();
 
         // 图标提取放到后台，面板先出来，图标逐个补齐
         _ = LoadIconsAsync(_items);
@@ -416,6 +538,18 @@ public partial class PanelWindow : Window
     }
 
     // ---------- 搜索 ----------
+
+    /// <summary>盒子标题栏上的放大镜：面板已开时就地展开搜索栏。</summary>
+    public void ShowSearchBar()
+    {
+        if (_searchOpen)
+        {
+            SearchBox.Focus();
+            SearchBox.SelectAll();
+            return;
+        }
+        OpenSearch();
+    }
 
     private void OnSearchClick(object sender, RoutedEventArgs e)
     {
@@ -513,14 +647,14 @@ public partial class PanelWindow : Window
             return;
 
         // 光标还在面板/盒子上 → 可能是点击盒子切换面板，交给盒子处理
-        var p = WF.Cursor.Position;
+        var p = ScreenUtil.CursorPosition();
         if (IsCursorOver(this, p) || IsCursorOver(_owner, p))
             return;
 
         ClosePanel();
     }
 
-    private static bool IsCursorOver(Window w, System.Drawing.Point screenPt)
+    private static bool IsCursorOver(Window w, PixelPoint screenPt)
     {
         if (!w.IsLoaded || w.Visibility != Visibility.Visible) return false;
         try
@@ -554,13 +688,17 @@ public partial class PanelWindow : Window
     private void OnMoreClick(object sender, RoutedEventArgs e)
     {
         var menu = new ContextMenu();
-        AppearanceTheme.AttachMenu(menu, _box);
+        AppearanceTheme.AttachMenu(menu, _box, _config.Settings.MenuOpacity, this);
 
-        var miDissolve = new MenuItem { Header = "解散收纳盒（文件放回桌面）" };
-        miDissolve.Click += (_, _) => DissolveBox();
-        menu.Items.Add(miDissolve);
+        // 映射盒的"解散"语义不成立（文件不在本程序手里），干脆不提供这一项
+        if (!ConfigStore.IsPortal(_box))
+        {
+            var miDissolve = new MenuItem { Header = "解散收纳盒（文件放回桌面）" };
+            miDissolve.Click += (_, _) => DissolveBox();
+            menu.Items.Add(miDissolve);
 
-        menu.Items.Add(new Separator());
+            menu.Items.Add(new Separator());
+        }
 
         var miSortName = new MenuItem
         {
@@ -589,6 +727,17 @@ public partial class PanelWindow : Window
 
     private void DissolveBox()
     {
+        // 映射盒没有"把文件放回桌面"这一步：文件本来就不在本程序手里，
+        // 强行搬到桌面等于替用户搬走别人的文件夹内容
+        if (ConfigStore.IsPortal(_box))
+        {
+            MessageBox.Show(this,
+                $"这个盒子映射的是已有文件夹，不会把里面的文件搬到桌面。\n\n" +
+                $"如需移除，请在盒子右键菜单里选「移除这个映射盒子」。\n\n{_store.SourceDir(_box)}",
+                "映射盒子", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
         var dir = _store.BoxDir(_box);
         if (!Directory.Exists(dir)) return;
 
@@ -606,7 +755,11 @@ public partial class PanelWindow : Window
         _suppressDeactivate = false;
         if (result != MessageBoxResult.Yes) return;
 
-        FileMover.MoveBackToDesktop(files, out var skipped);
+        List<string> skipped;
+        using (_owner.SuppressWatcher())
+        {
+            FileMover.MoveBackToDesktop(files, out skipped);
+        }
         _box.Order.Clear();
         _store.Save(_config);
         RefreshItems();
@@ -624,7 +777,7 @@ public partial class PanelWindow : Window
     /// </summary>
     private void ApplySort(SortMode mode)
     {
-        var dir = _store.BoxDir(_box);
+        var dir = _store.SourceDir(_box);
         if (!Directory.Exists(dir)) return;
 
         var names = Directory.EnumerateFileSystemEntries(dir)
@@ -959,16 +1112,19 @@ public partial class PanelWindow : Window
         data.SetData("Preferred DropEffect", ms);
 
         _suppressDeactivate = true;
-        try
+        using (_owner.SuppressWatcher())
         {
-            DragDrop.DoDragDrop((DependencyObject)sender, data,
-                DragDropEffects.Move | DragDropEffects.Copy);
-        }
-        finally
-        {
-            _suppressDeactivate = false;
-            _draggingItem = false;
-            _internalDrag = false;
+            try
+            {
+                DragDrop.DoDragDrop((DependencyObject)sender, data,
+                    DragDropEffects.Move | DragDropEffects.Copy);
+            }
+            finally
+            {
+                _suppressDeactivate = false;
+                _draggingItem = false;
+                _internalDrag = false;
+            }
         }
 
         RefreshItems();
@@ -990,7 +1146,7 @@ public partial class PanelWindow : Window
         bool multi = sel.Count > 1;
 
         var menu = new ContextMenu();
-        AppearanceTheme.AttachMenu(menu, _box);
+        AppearanceTheme.AttachMenu(menu, _box, _config.Settings.MenuOpacity, this);
 
         var miOpen = new MenuItem { Header = multi ? $"打开（{sel.Count}）" : "打开" };
         miOpen.Click += (_, _) =>
@@ -1030,7 +1186,11 @@ public partial class PanelWindow : Window
     private void MoveBackToDesktop(List<PanelItem> items)
     {
         if (items.Count == 0) return;
-        FileMover.MoveBackToDesktop(items.Select(i => i.FilePath), out var skipped);
+        List<string> skipped;
+        using (_owner.SuppressWatcher())
+        {
+            FileMover.MoveBackToDesktop(items.Select(i => i.FilePath), out skipped);
+        }
 
         foreach (var i in items)
             _box.Order.Remove(Path.GetFileName(i.FilePath));

@@ -2,6 +2,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using ToniaDeskBox.Models;
 using ToniaDeskBox.Services;
@@ -38,6 +39,7 @@ public partial class GlobalSettingsWindow : Window
         var g = config.Settings.Global;
         _selectedColor = g?.BackColor ?? "#1F2A30";
         OpacitySlider.Value = Math.Clamp((g?.Opacity ?? 0.85) * 100, 0, 100);
+        MenuOpacitySlider.Value = Math.Clamp(_config.Settings.MenuOpacity * 100, 0, 100);
         RoundedCheck.IsChecked = g?.Rounded ?? true;
         RadiusSlider.Value = g?.CornerSize ?? 8;
         TopmostCheck.IsChecked = g?.Topmost ?? false;
@@ -47,6 +49,7 @@ public partial class GlobalSettingsWindow : Window
         SyncThemeChips();
         UpdatePreview();
         RefreshStorageInfo();
+        LoadHotkeys();
     }
 
     // ---------- 主题模式 ----------
@@ -145,9 +148,12 @@ public partial class GlobalSettingsWindow : Window
 
     // ---------- 数值输入框 ↔ 滑杆 ----------
 
+    private void OnMenuOpacityChanged(object sender, RoutedEventArgs e) => SyncValueBoxes();
+
     private void SyncValueBoxes()
     {
         OpacityBox.Text = $"{Math.Round(OpacitySlider.Value):0}";
+        MenuOpacityBox.Text = $"{Math.Round(MenuOpacitySlider.Value):0}";
         RadiusBox.Text = $"{Math.Round(RadiusSlider.Value):0}";
     }
 
@@ -163,7 +169,9 @@ public partial class GlobalSettingsWindow : Window
 
     private void CommitValueBox(TextBox box)
     {
-        var slider = box == OpacityBox ? OpacitySlider : RadiusSlider;
+        var slider = box == OpacityBox ? OpacitySlider
+            : box == MenuOpacityBox ? MenuOpacitySlider
+            : RadiusSlider;
         if (!double.TryParse(box.Text.Trim(), out var v))
         {
             SyncValueBoxes();
@@ -217,16 +225,116 @@ public partial class GlobalSettingsWindow : Window
     {
         var g = _config.Settings.Global ??= new GlobalBoxSettings();
         g.Opacity = OpacitySlider.Value / 100.0;
+        _config.Settings.MenuOpacity = MenuOpacitySlider.Value / 100.0;
         g.BackColor = _selectedColor;
         g.Rounded = RoundedCheck.IsChecked == true;
         g.CornerSize = RadiusSlider.Value;
         g.Topmost = TopmostCheck.IsChecked == true;
+        _config.Settings.Hotkey = _showHotkey;
+        _config.Settings.HideHotkey = _hideHotkey;
         _store.Save(_config);
 
         if (Application.Current is App app)
+        {
             app.ApplyGlobalToAllBoxes(g);
 
+            // 热键注册失败最常见的原因是键位被占用：就地提示并留在窗口里，
+            // 让用户直接换一个，而不是关掉窗口后才发现热键不生效
+            var error = app.ApplyHotkeys(reportToUser: false);
+            if (error.Length > 0)
+            {
+                MessageBox.Show(this,
+                    $"{error}\n\n可以点输入框重新录制一个组合键，或点「清除」暂时不用热键。",
+                    "全局热键", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+        }
+
         Close();
+    }
+
+    // ---------- 全局热键 ----------
+
+    // "" = 用默认值；"-" = 明确关闭；其余是录制下来的组合键
+    private string _showHotkey = "";
+    private string _hideHotkey = "";
+
+    private void LoadHotkeys()
+    {
+        _showHotkey = _config.Settings.Hotkey;
+        _hideHotkey = _config.Settings.HideHotkey;
+        SyncHotkeyBoxes();
+    }
+
+    private void SyncHotkeyBoxes()
+    {
+        ShowHotkeyBox.Text = _showHotkey switch
+        {
+            HotkeyService.Disabled => "未启用",
+            "" => HotkeyService.DefaultShow,
+            _ => _showHotkey,
+        };
+        HideHotkeyBox.Text = string.IsNullOrWhiteSpace(_hideHotkey) ? "未设置" : _hideHotkey;
+        HotkeyHintText.Text =
+            $"默认 {HotkeyService.DefaultShow}。点进输入框后直接按下组合键即可录制（必须含 Ctrl / Alt / Shift / Win 之一）；" +
+            "键位被其他程序占用时会有提示，换一个即可。";
+    }
+
+    private void OnHotkeyBoxFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        // 把光标放到末尾：录制时按键不会替换掉已有文字，整串会由录制结果覆盖
+        if (sender is TextBox tb) tb.CaretIndex = tb.Text.Length;
+    }
+
+    private void OnShowHotkeyKeyDown(object sender, KeyEventArgs e)
+    {
+        e.Handled = true;
+        if (e.Key is Key.Back or Key.Delete)
+        {
+            _showHotkey = HotkeyService.Disabled;
+            SyncHotkeyBoxes();
+            return;
+        }
+        CaptureHotkey(e, h => _showHotkey = h);
+    }
+
+    private void OnHideHotkeyKeyDown(object sender, KeyEventArgs e)
+    {
+        e.Handled = true;
+        if (e.Key is Key.Back or Key.Delete)
+        {
+            _hideHotkey = "";
+            SyncHotkeyBoxes();
+            return;
+        }
+        CaptureHotkey(e, h => _hideHotkey = h);
+    }
+
+    private void CaptureHotkey(KeyEventArgs e, Action<string> apply)
+    {
+        // Alt 组合在 WPF 里以 Key.System 到达，真正的键在 SystemKey 上
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        var combo = HotkeyService.FromKeyEvent(key, Keyboard.Modifiers);
+        if (combo == null)
+        {
+            HotkeyHintText.Text = "需要一个「修饰键 + 主键」的组合，例如 Ctrl+Alt+D。";
+            return;
+        }
+        apply(combo);
+        SyncHotkeyBoxes();
+    }
+
+    private void OnClearShowHotkey(object sender, RoutedEventArgs e)
+    {
+        _showHotkey = HotkeyService.Disabled;
+        SyncHotkeyBoxes();
+        HotkeyHintText.Text = "已清除：确定后不再注册呼出热键。想恢复默认就重新录制一个组合键。";
+    }
+
+    private void OnClearHideHotkey(object sender, RoutedEventArgs e)
+    {
+        _hideHotkey = "";
+        SyncHotkeyBoxes();
     }
 
     // ---------- 存储位置 ----------

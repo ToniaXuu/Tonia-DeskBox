@@ -7,6 +7,10 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{76CF854D-736
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ToniaDeskBox", "src\ToniaDeskBox\ToniaDeskBox.csproj", "{874347D9-63A0-4CF9-946C-13E6D2A35A9E}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{CC643746-6522-4851-BFF7-2ECAD01BB280}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ToniaDeskBox.Tests", "tests\ToniaDeskBox.Tests\ToniaDeskBox.Tests.csproj", "{8D2E0297-D680-4E9A-BCA3-B6C762044DF3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -20,8 +24,13 @@ Global
 		{874347D9-63A0-4CF9-946C-13E6D2A35A9E}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{874347D9-63A0-4CF9-946C-13E6D2A35A9E}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{874347D9-63A0-4CF9-946C-13E6D2A35A9E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8D2E0297-D680-4E9A-BCA3-B6C762044DF3}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8D2E0297-D680-4E9A-BCA3-B6C762044DF3}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8D2E0297-D680-4E9A-BCA3-B6C762044DF3}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8D2E0297-D680-4E9A-BCA3-B6C762044DF3}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{874347D9-63A0-4CF9-946C-13E6D2A35A9E} = {76CF854D-7366-47D6-819C-62308F5F228B}
+		{8D2E0297-D680-4E9A-BCA3-B6C762044DF3} = {CC643746-6522-4851-BFF7-2ECAD01BB280}
 	EndGlobalSection
 EndGlobal

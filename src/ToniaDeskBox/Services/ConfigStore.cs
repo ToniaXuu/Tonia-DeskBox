@@ -267,6 +267,19 @@ public class ConfigStore
             needSave = true;
         }
 
+        // 一次性迁移：老配置没有 DisplayMode 字段，按原来的宽度推断——
+        // 宽盒子（W ≥ 240）原本就是内嵌网格，保持「显示内容」；窄盒子原本是折叠态，
+        // 恢复成带缩略图的样子。之后用户自己切到「仅标题」才会写进配置。
+        if (!cfg.Settings.DisplayModeMigrated)
+        {
+            foreach (var b in cfg.Boxes)
+                b.DisplayMode = b.W >= BoxMetrics.ContentMinWidth
+                    ? BoxDisplayMode.Content
+                    : BoxDisplayMode.Preview;
+            cfg.Settings.DisplayModeMigrated = true;
+            needSave = true;
+        }
+
         if (needSave) Save(cfg);
         return cfg;
     }
@@ -281,6 +294,23 @@ public class ConfigStore
             if (!IsSafeSegment(b.Id)) { b.Id = Guid.NewGuid().ToString("N")[..8]; changed = true; }
             if (!IsSafeSegment(b.Name)) { b.Name = "盒子-" + b.Id; changed = true; }
             if (b.Order == null) { b.Order = new List<string>(); changed = true; }
+
+            // 映射盒必须有目标目录；缺了就退回普通盒，避免出现"点开是空的、还不知道为什么"的盒子。
+            // 普通盒顺手清掉残留的 PortalPath，配置里不留死字段。
+            if (b.Kind == BoxKind.Portal)
+            {
+                if (string.IsNullOrWhiteSpace(b.PortalPath) || !Path.IsPathRooted(b.PortalPath))
+                {
+                    b.Kind = BoxKind.Files;
+                    b.PortalPath = null;
+                    changed = true;
+                }
+            }
+            else if (b.PortalPath != null)
+            {
+                b.PortalPath = null;
+                changed = true;
+            }
 
             // 同名盒子会共用同一数据目录，必须消歧
             var name = b.Name;
@@ -447,10 +477,39 @@ public class ConfigStore
         return dir;
     }
 
+    /// <summary>映射盒：不搬文件，只镜像一个已存在的目录。</summary>
+    public static bool IsPortal(BoxConfig box) =>
+        box.Kind == BoxKind.Portal && !string.IsNullOrWhiteSpace(box.PortalPath);
+
+    /// <summary>
+    /// 盒子「看到」的目录：映射盒是目标文件夹，普通盒是数据根下的同名目录。
+    /// 渲染、计数、拖入、面板刷新一律走这里，两边才不会各自写一套判断。
+    /// </summary>
+    public string SourceDir(BoxConfig box)
+    {
+        if (!IsPortal(box)) return BoxDir(box);
+        try
+        {
+            return Path.GetFullPath(box.PortalPath!);
+        }
+        catch
+        {
+            return box.PortalPath!;
+        }
+    }
+
     public int CountOf(BoxConfig box)
     {
-        var dir = BoxDir(box);
-        return Directory.Exists(dir) ? Directory.EnumerateFileSystemEntries(dir).Count() : 0;
+        var dir = SourceDir(box);
+        try
+        {
+            return Directory.Exists(dir) ? Directory.EnumerateFileSystemEntries(dir).Count() : 0;
+        }
+        catch
+        {
+            // 映射到网络盘 / 被拔掉的移动硬盘时枚举会抛：计数当作 0，不要让它冒到 UI
+            return 0;
+        }
     }
 
     public void Log(string message)

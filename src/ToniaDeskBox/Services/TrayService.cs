@@ -6,31 +6,34 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using ToniaDeskBox.Models;
-using WF = System.Windows.Forms;
 
 namespace ToniaDeskBox.Services;
 
 /// <summary>
 /// 托盘图标 + 右键菜单。
-/// 菜单不再用 WinForms ContextMenuStrip（无法套用应用主题），改为 WPF ContextMenu，
-/// 与盒子 / 面板 / 设置窗口共用同一套 Theme.* 笔刷。
+///
+/// 图标走原生 <see cref="TrayIcon"/>（Shell_NotifyIcon），不再依赖 WinForms；
+/// 菜单仍是 WPF ContextMenu，与盒子 / 面板 / 设置窗口共用同一套 Theme.* 笔刷
+/// （WinForms ContextMenuStrip 无法套用应用主题）。
 /// </summary>
 public class TrayService : IDisposable
 {
-    private readonly WF.NotifyIcon _notifyIcon;
+    private readonly TrayIcon _trayIcon;
     private readonly AppConfig _config;
     // 数据根可在设置里迁移，所以取实时值而不是构造时快照
     private readonly Func<string> _dataRoot;
     private readonly bool _autoStart;
-    private System.Drawing.Icon? _appIcon;
+    private byte[]? _appIcon;
     private ContextMenu? _openMenu;
     // 托盘菜单没有父窗口：给 Popup 一个不可见的宿主席位，否则菜单会立刻自行关闭
     private Window? _menuHost;
     private IntPtr _prevForeground;
 
     public event Action? NewBoxRequested;
+    public event Action? MapFolderRequested;
     public event Action? ShowAllRequested;
     public event Action? HideAllRequested;
+    public event Action? TidyRequested;
     public event Action? AutoSortRequested;
     public event Action<bool>? AutoStartToggled;
     public event Action? GlobalSettingsRequested;
@@ -45,28 +48,20 @@ public class TrayService : IDisposable
         _dataRoot = dataRoot;
         _autoStart = autoStart;
 
-        _notifyIcon = new WF.NotifyIcon
-        {
-            Text = "Tonia-DeskBox",
-            Icon = LoadAppIcon() ?? System.Drawing.SystemIcons.Application,
-            Visible = true,
-        };
-        _notifyIcon.MouseUp += OnTrayMouseUp;
+        _trayIcon = new TrayIcon("Tonia-DeskBox");
+        _trayIcon.ContextMenuRequested += ShowMenu;
+        // 双击托盘直接呼出全部盒子：和全局热键是同一套动作
+        _trayIcon.DoubleClicked += () => ShowAllRequested?.Invoke();
+        SetIcon();
 
         // 系统深浅色切换时同步托盘图标（窗口标题栏图标由 DynamicResource 自动刷新）
         AppIconService.ThemeChanged += OnThemeChanged;
     }
 
-    private System.Drawing.Icon? LoadAppIcon()
+    private void SetIcon()
     {
-        _appIcon = AppIconService.LoadTrayIcon();
-        return _appIcon;
-    }
-
-    private void OnTrayMouseUp(object? sender, WF.MouseEventArgs e)
-    {
-        if (e.Button != WF.MouseButtons.Right) return;
-        ShowMenu();
+        _appIcon = AppIconService.LoadTrayIconBytes();
+        _trayIcon.SetIcon(_appIcon);
     }
 
     // ---------- 托盘菜单（WPF，与其它窗口同一套外观） ----------
@@ -92,12 +87,16 @@ public class TrayService : IDisposable
         // 主题模式下底色由主题接管，所以还要过一层 ResolveColor
         var (back, opacity) = ResolveAppearance();
         AppearanceTheme.Attach(menu).Update(
-            ThemeService.ResolveColor(back), opacity, "托盘菜单", minAlpha: 0.96);
+            ThemeService.ResolveColor(back), opacity, "托盘菜单",
+            minAlpha: Math.Max(0.96, _config.Settings.MenuOpacity));
 
         AddItem(menu, "新建盒子", () => NewBoxRequested?.Invoke());
+        AddItem(menu, "映射文件夹…", () => MapFolderRequested?.Invoke());
         menu.Items.Add(new Separator());
         AddItem(menu, "显示全部", () => ShowAllRequested?.Invoke());
         AddItem(menu, "隐藏全部", () => HideAllRequested?.Invoke());
+        menu.Items.Add(new Separator());
+        AddItem(menu, "一键整理桌面…", () => TidyRequested?.Invoke());
         AddItem(menu, "整理盒子", () => AutoSortRequested?.Invoke());
         menu.Items.Add(new Separator());
         AddItem(menu, "全局盒子设置…", () => GlobalSettingsRequested?.Invoke());
@@ -195,20 +194,11 @@ public class TrayService : IDisposable
 
     // ---------- 图标主题 ----------
 
-    private void OnThemeChanged()
-    {
-        var next = AppIconService.LoadTrayIcon();
-        if (next == null) return;
-        var old = _appIcon;
-        _appIcon = next;
-        _notifyIcon.Icon = next;
-        old?.Dispose();
-    }
+    private void OnThemeChanged() => SetIcon();
 
     public void Dispose()
     {
         AppIconService.ThemeChanged -= OnThemeChanged;
-        _notifyIcon.MouseUp -= OnTrayMouseUp;
         if (_openMenu != null)
         {
             _openMenu.IsOpen = false;
@@ -216,8 +206,7 @@ public class TrayService : IDisposable
         }
         _menuHost?.Close();
         _menuHost = null;
-        _notifyIcon.Visible = false;
-        _notifyIcon.Dispose();
-        _appIcon?.Dispose();
+        _trayIcon.Dispose();
+        _appIcon = null;
     }
 }

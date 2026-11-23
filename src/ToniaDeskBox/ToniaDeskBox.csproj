@@ -4,7 +4,10 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
-    <UseWindowsForms>true</UseWindowsForms>
+    <!-- 不打开 UseWindowsForms：托盘图标由 Services/TrayIcon.cs 直接走 Shell_NotifyIcon，
+         屏幕与光标坐标由 Services/ScreenUtil.cs 走 MonitorFromWindow / GetCursorPos。
+         注意：单文件体积不会因此变小（WinForms 与 WPF 同在 WindowsDesktop 共享框架里），
+         收益是运行时不再加载 WinForms / System.Drawing 这两套程序集。 -->
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>ToniaDeskBox</RootNamespace>
@@ -16,7 +19,7 @@
          程序内「关于」三处必须一致，改版本只需改这一行 + installer 里的同名默认值。
          AssemblyVersion / FileVersion / InformationalVersion 全部由它推导，
          这样 CI 用 -p:Version=x.y.z 注入时，文件属性也会跟着变。 -->
-    <Version>0.2.1</Version>
+    <Version>0.3.0</Version>
     <Product>Tonia-DeskBox</Product>
     <AssemblyTitle>Tonia-DeskBox</AssemblyTitle>
     <Description>桌面盒子整理工具</Description>
@@ -24,17 +27,11 @@
     <Copyright>Copyright © 2026 Tonia</Copyright>
 
     <!-- 默认会在 InformationalVersion 后面拼 "+提交哈希"，更新检查要按语义版本比较，
-         这里关掉，保证 AssemblyInformationalVersion 就是干净的 0.2.0 -->
+         这里关掉，保证 AssemblyInformationalVersion 就是干净的 0.3.0 -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
 
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
   </PropertyGroup>
-
-  <ItemGroup>
-    <!-- 移除 UseWindowsForms 注入的隐式全局 using，避免与 WPF 类型冲突；需要处用 WF 别名 -->
-    <Using Remove="System.Windows.Forms" />
-    <Using Remove="System.Drawing" />
-  </ItemGroup>
 
   <ItemGroup>
     <!-- app.ico 只用于编译期写入 exe 的 Win32 图标，固定浅色版 -->

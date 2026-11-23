@@ -84,6 +84,9 @@
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="62"/>
@@ -126,9 +129,29 @@
                                    Margin="7,0,0,0" VerticalAlignment="Center" Width="14"/>
                     </Grid>
 
-                    <TextBlock Grid.Row="2" Grid.Column="0" Text="背景色" Foreground="{DynamicResource Theme.TextSecondary}"
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="菜单" Foreground="{DynamicResource Theme.TextSecondary}"
+                               VerticalAlignment="Center" Margin="0,0,0,14"
+                               ToolTip="右键菜单 / 托盘菜单的不透明度"/>
+                    <Grid Grid.Row="2" Grid.Column="1" Margin="0,0,0,14">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Slider x:Name="MenuOpacitySlider" Minimum="0" Maximum="100" Margin="0,0,12,0"
+                                Style="{StaticResource ModernSlider}" VerticalAlignment="Center"
+                                ToolTip="菜单面板的不透明度，独立于盒子；默认比盒子更实，避免叠在卡片上读不清"
+                                ValueChanged="OnMenuOpacityChanged"/>
+                        <TextBox x:Name="MenuOpacityBox" Grid.Column="1" Style="{StaticResource NumberBox}"
+                                 ToolTip="范围：0～100（%）"
+                                 KeyDown="OnValueBoxKeyDown" LostFocus="OnValueBoxLostFocus"/>
+                        <TextBlock Grid.Column="2" Text="%" Foreground="{DynamicResource Theme.TextSecondary}"
+                                   Margin="7,0,0,0" VerticalAlignment="Center" Width="14"/>
+                    </Grid>
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="背景色" Foreground="{DynamicResource Theme.TextSecondary}"
                                VerticalAlignment="Top" Margin="0,6,0,14"/>
-                    <StackPanel Grid.Row="2" Grid.Column="1" Margin="0,0,0,14">
+                    <StackPanel Grid.Row="3" Grid.Column="1" Margin="0,0,0,14">
                         <WrapPanel x:Name="SwatchPanel" Margin="0,0,0,10"/>
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -144,12 +167,12 @@
                         </Grid>
                     </StackPanel>
 
-                    <Border Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
+                    <Border Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
                             Background="{DynamicResource Theme.Divider}" Margin="0,0,0,14"/>
 
-                    <TextBlock Grid.Row="4" Grid.Column="0" Text="圆角" Foreground="{DynamicResource Theme.TextSecondary}"
+                    <TextBlock Grid.Row="5" Grid.Column="0" Text="圆角" Foreground="{DynamicResource Theme.TextSecondary}"
                                VerticalAlignment="Center" Margin="0,0,0,14"/>
-                    <Grid Grid.Row="4" Grid.Column="1" Margin="0,0,0,14">
+                    <Grid Grid.Row="5" Grid.Column="1" Margin="0,0,0,14">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="Auto"/>
@@ -168,27 +191,27 @@
                                  KeyDown="OnValueBoxKeyDown" LostFocus="OnValueBoxLostFocus"/>
                     </Grid>
 
-                    <Border Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
+                    <Border Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
                             Background="{DynamicResource Theme.Divider}" Margin="0,0,0,14"/>
 
                     <!-- 外观说明（原毛玻璃开关已移除） -->
-                    <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="2"
+                    <TextBlock Grid.Row="7" Grid.Column="0" Grid.ColumnSpan="2"
                                Text="底色为半透明纯色（由透明度控制），不做毛玻璃；文字、描边与图标会随底色深浅自动切换对比色。"
                                Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
                                TextWrapping="Wrap" Margin="0,0,0,14"/>
 
-                    <TextBlock Grid.Row="7" Grid.Column="0" Text="置顶" Foreground="{DynamicResource Theme.TextSecondary}"
+                    <TextBlock Grid.Row="8" Grid.Column="0" Text="置顶" Foreground="{DynamicResource Theme.TextSecondary}"
                                VerticalAlignment="Center" Margin="0,0,0,18"/>
-                    <CheckBox x:Name="TopmostCheck" Grid.Row="7" Grid.Column="1" Style="{StaticResource ModernCheck}"
+                    <CheckBox x:Name="TopmostCheck" Grid.Row="8" Grid.Column="1" Style="{StaticResource ModernCheck}"
                               Content="盒子保持在最前" VerticalAlignment="Center" Margin="0,0,0,18"/>
 
-                    <Border Grid.Row="8" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
+                    <Border Grid.Row="9" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
                             Background="{DynamicResource Theme.Divider}" Margin="0,0,0,14"/>
 
                     <!-- 存储位置：盒子收纳的是真实文件，可能很大，不能强制留在系统盘 -->
-                    <TextBlock Grid.Row="9" Grid.Column="0" Text="存储" Foreground="{DynamicResource Theme.TextSecondary}"
+                    <TextBlock Grid.Row="10" Grid.Column="0" Text="存储" Foreground="{DynamicResource Theme.TextSecondary}"
                                VerticalAlignment="Top" Margin="0,7,0,14"/>
-                    <StackPanel Grid.Row="9" Grid.Column="1" Margin="0,0,0,14">
+                    <StackPanel Grid.Row="10" Grid.Column="1" Margin="0,0,0,14">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
@@ -214,12 +237,69 @@
                                    Foreground="{DynamicResource Theme.TextMuted}" TextWrapping="Wrap"/>
                     </StackPanel>
 
-                    <TextBlock Grid.Row="10" Grid.Column="0" Grid.ColumnSpan="2"
+                    <Border Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="2" Height="1"
+                            Background="{DynamicResource Theme.Divider}" Margin="0,0,0,14"/>
+
+                    <!-- 全局热键：呼出是每天几十次的动作，不值得每次都找鼠标 -->
+                    <TextBlock Grid.Row="12" Grid.Column="0" Text="热键" Foreground="{DynamicResource Theme.TextSecondary}"
+                               VerticalAlignment="Top" Margin="0,7,0,14"/>
+                    <StackPanel Grid.Row="12" Grid.Column="1" Margin="0,0,0,14">
+                        <Grid Margin="0,0,0,8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="52"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="呼出" Foreground="{DynamicResource Theme.TextSecondary}"
+                                       VerticalAlignment="Center" FontSize="12"/>
+                            <TextBox x:Name="ShowHotkeyBox" Grid.Column="1" IsReadOnly="True"
+                                     Style="{StaticResource ModernTextBox}" Height="30" FontSize="12"
+                                     Padding="9,0" VerticalContentAlignment="Center"
+                                     ToolTip="点进来后直接按下组合键即可录制"
+                                     PreviewKeyDown="OnShowHotkeyKeyDown"
+                                     GotKeyboardFocus="OnHotkeyBoxFocus"/>
+                            <Button Grid.Column="2" Content="清除" Style="{StaticResource GhostButton}"
+                                    Padding="9,4" Margin="8,0,0,0" FontSize="12"
+                                    Click="OnClearShowHotkey"
+                                    ToolTip="清除后不再注册呼出热键"/>
+                            <TextBlock Grid.Column="3" Text="呼出全部盒子并置顶"
+                                       Foreground="{DynamicResource Theme.TextMuted}"
+                                       FontSize="11" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="52"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="收起" Foreground="{DynamicResource Theme.TextSecondary}"
+                                       VerticalAlignment="Center" FontSize="12"/>
+                            <TextBox x:Name="HideHotkeyBox" Grid.Column="1" IsReadOnly="True"
+                                     Style="{StaticResource ModernTextBox}" Height="30" FontSize="12"
+                                     Padding="9,0" VerticalContentAlignment="Center"
+                                     ToolTip="点进来后直接按下组合键即可录制"
+                                     PreviewKeyDown="OnHideHotkeyKeyDown"
+                                     GotKeyboardFocus="OnHotkeyBoxFocus"/>
+                            <Button Grid.Column="2" Content="清除" Style="{StaticResource GhostButton}"
+                                    Padding="9,4" Margin="8,0,0,0" FontSize="12"
+                                    Click="OnClearHideHotkey"
+                                    ToolTip="留空表示不占用这个键位"/>
+                            <TextBlock Grid.Column="3" Text="收起全部盒子（可选）"
+                                       Foreground="{DynamicResource Theme.TextMuted}"
+                                       FontSize="11" Margin="10,0,0,0" VerticalAlignment="Center"/>
+                        </Grid>
+                        <TextBlock x:Name="HotkeyHintText" FontSize="11" Margin="0,7,0,0"
+                                   Foreground="{DynamicResource Theme.TextMuted}" TextWrapping="Wrap"/>
+                    </StackPanel>
+
+                    <TextBlock Grid.Row="13" Grid.Column="0" Grid.ColumnSpan="2"
                                Text="确定后立即应用到所有盒子；之后新建的盒子也会使用这套默认值。"
                                Foreground="{DynamicResource Theme.TextMuted}" FontSize="11" TextWrapping="Wrap"
                                VerticalAlignment="Center" Margin="0,0,0,16"/>
 
-                    <StackPanel Grid.Row="11" Grid.Column="0" Grid.ColumnSpan="2"
+                    <StackPanel Grid.Row="14" Grid.Column="0" Grid.ColumnSpan="2"
                                 Orientation="Horizontal" HorizontalAlignment="Right">
                         <Button x:Name="OkBtn" Content="确定" Style="{StaticResource AccentButton}"
                                 Width="88" Height="34" IsDefault="True" Click="OnOk"/>

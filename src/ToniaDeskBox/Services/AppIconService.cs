@@ -64,8 +64,11 @@ public static class AppIconService
         }
     }
 
-    /// <summary>托盘用 GDI+ 图标；资源读取失败时返回 null，由调用方回退系统默认图标</summary>
-    public static System.Drawing.Icon? LoadTrayIcon()
+    /// <summary>
+    /// 托盘和图标的原始 ICO 字节。交给 <see cref="TrayIcon"/> 自己转 HICON，
+    /// 这样无需为了一个托盘图标引入 System.Drawing。
+    /// </summary>
+    public static byte[]? LoadTrayIconBytes()
     {
         try
         {
@@ -73,7 +76,7 @@ public static class AppIconService
             if (sri == null) return null;
             using var ms = new MemoryStream();
             sri.Stream.CopyTo(ms);
-            return new System.Drawing.Icon(new MemoryStream(ms.ToArray()));
+            return ms.ToArray();
         }
         catch
         {

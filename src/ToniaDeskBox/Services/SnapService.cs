@@ -10,7 +10,7 @@ public static class SnapService
 
     private struct Info
     {
-        public System.Drawing.Rectangle Wa;
+        public PixelRect Wa;
         public double Dpi;
     }
 
@@ -20,7 +20,7 @@ public static class SnapService
         if (window.ActualWidth <= 0 || window.ActualHeight <= 0) return false;
         var hwnd = new WindowInteropHelper(window).Handle;
         if (hwnd == IntPtr.Zero) return false;
-        info.Wa = System.Windows.Forms.Screen.FromHandle(hwnd).WorkingArea;
+        info.Wa = ScreenUtil.WorkAreaPx(hwnd);
         info.Dpi = VisualTreeHelper.GetDpi(window).PixelsPerDip;
         return true;
     }
@@ -66,7 +66,7 @@ public static class SnapService
     // 注意单位：Wa 是物理像素，left/top/w/h 是 DIP，必须先换算再运算
     private static void SnapEdges(ref double l, ref double t, double w, double h, in Info info)
     {
-        double waX = info.Wa.Left / info.Dpi, waY = info.Wa.Top / info.Dpi;
+        double waX = info.Wa.X / info.Dpi, waY = info.Wa.Y / info.Dpi;
         double waW = info.Wa.Width / info.Dpi, waH = info.Wa.Height / info.Dpi;
 
         if (Math.Abs(l - waX) < Threshold)
@@ -143,7 +143,7 @@ public static class SnapService
 
     private static void Clamp(ref double l, ref double t, double w, double h, in Info info)
     {
-        double waX = info.Wa.Left / info.Dpi, waY = info.Wa.Top / info.Dpi;
+        double waX = info.Wa.X / info.Dpi, waY = info.Wa.Y / info.Dpi;
         double waR = info.Wa.Right / info.Dpi, waB = info.Wa.Bottom / info.Dpi;
 
         // 窗口比工作区还大时上限会小于下限，Math.Clamp 会抛异常，这里退化为贴边

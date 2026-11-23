@@ -11,12 +11,48 @@
         ShowActivated="False"
         ResizeMode="NoResize"
         SizeToContent="WidthAndHeight"
+        TextOptions.TextFormattingMode="Display"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
         SourceInitialized="OnSourceInitialized">
+    <Window.Resources>
+        <!-- 隐藏内容模式下直接挂在盒子上的搜索 / 更多按钮。
+             命中区 22×20：盒子本身很小，按钮再大就会把标题挤没 -->
+        <Style x:Key="BoxIconButton" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource Theme.TextMuted}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Width" Value="22"/>
+            <Setter Property="Height" Value="20"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.FillStrong}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <!-- 内边距与 PanelWindow 的 Root 对齐（12,10）：两块卡片并排时才不会
+         因为 2px 的差异被看成两种东西。圆角运行期由 Box.CornerSize 覆盖，
+         面板那边取 CornerSize + 2 做光学补偿，这里只是设计期默认值。 -->
     <Border x:Name="RootBorder"
             Background="{DynamicResource Theme.Surface}"
             BorderBrush="{DynamicResource Theme.Border}"
-            CornerRadius="12"
-            Padding="14,10"
+            CornerRadius="10"
+            Padding="12,10"
             BorderThickness="1"
             AllowDrop="True"
             Drop="OnDrop"
@@ -24,109 +60,87 @@
             DragLeave="OnDragLeave"
             MouseLeftButtonDown="OnBoxMouseLeftButtonDown"
             MouseLeftButtonUp="OnBoxMouseLeftButtonUp"
-            MouseRightButtonDown="OnBoxMouseRightButtonDown"
-            Cursor="Hand">
+            MouseRightButtonDown="OnBoxMouseRightButtonDown">
         <Grid>
             <Grid.RowDefinitions>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="*"/>
             </Grid.RowDefinitions>
-            <StackPanel Grid.Row="0" Orientation="Horizontal">
-            <StackPanel Orientation="Horizontal">
-                <Ellipse x:Name="AccentDot" Width="6" Height="6"
-                         Margin="0,0,8,0" VerticalAlignment="Center"
-                         Fill="{DynamicResource Theme.Accent}"/>
-                <TextBlock x:Name="NameText"
-                           Foreground="{DynamicResource Theme.Text}"
-                           FontSize="13"
-                           FontWeight="SemiBold"
-                           VerticalAlignment="Center"/>
-                <Border x:Name="BadgeBorder"
-                        Background="{DynamicResource Theme.AccentBadge}"
-                        CornerRadius="9"
-                        MinWidth="22"
-                        Height="18"
-                        Margin="9,0,0,0"
-                        Padding="7,0"
-                        VerticalAlignment="Center">
-                    <TextBlock x:Name="CountText"
-                               Foreground="{DynamicResource Theme.OnAccent}"
-                               FontSize="11"
+            <!-- 标题栏与空白处都能拖动整卡，但光标始终是普通箭头：
+                 拖动与点击共用同一个位移阈值判定，光标不该替用户判断"这里只能拖" -->
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel x:Name="TitleRow" Orientation="Horizontal">
+                    <Ellipse x:Name="AccentDot" Width="6" Height="6"
+                             Margin="0,0,8,0" VerticalAlignment="Center"
+                             Fill="{DynamicResource Theme.Accent}"/>
+                    <TextBlock x:Name="NameText"
+                               Foreground="{DynamicResource Theme.Text}"
+                               FontSize="13"
                                FontWeight="SemiBold"
-                               HorizontalAlignment="Center"
+                               TextTrimming="CharacterEllipsis"
                                VerticalAlignment="Center"/>
-                </Border>
-            </StackPanel>
-            </StackPanel>
+                    <!-- 数量徽标改为中性底：一张卡上只留圆点这一个彩色锚点 -->
+                    <Border x:Name="BadgeBorder"
+                            Background="{DynamicResource Theme.FillStrong}"
+                            CornerRadius="9"
+                            MinWidth="22"
+                            Height="18"
+                            Margin="8,0,0,0"
+                            Padding="7,0"
+                            VerticalAlignment="Center">
+                        <TextBlock x:Name="CountText"
+                                   Foreground="{DynamicResource Theme.Text}"
+                                   FontSize="11"
+                                   FontWeight="SemiBold"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"/>
+                    </Border>
+                    <!-- 映射盒标记：一眼能分清"搬家"与"镜像"，否则用户会担心文件被搬走了 -->
+                    <Border x:Name="PortalTag"
+                            Visibility="Collapsed"
+                            Background="{DynamicResource Theme.Fill}"
+                            CornerRadius="7"
+                            Padding="6,1"
+                            Margin="8,0,0,0"
+                            VerticalAlignment="Center"
+                            ToolTip="映射盒：显示的是已有文件夹，文件仍在原位置">
+                        <TextBlock Text="映射"
+                                   Foreground="{DynamicResource Theme.Text}"
+                                   FontSize="11"/>
+                    </Border>
+                </StackPanel>
 
-        <!-- 内嵌内容网格：固定宽度 >= 240 时显示 -->
-        <Border Grid.Row="2" x:Name="GridHost"
-                Visibility="Collapsed"
-                Margin="0,10,0,0">
-            <Grid>
-                <TextBlock x:Name="InlineEmptyHint"
-                           Text="把桌面图标拖进来收纳"
-                           Foreground="{DynamicResource Theme.TextMuted}"
-                           FontSize="12"
-                           Margin="4,6,0,2"
-                           HorizontalAlignment="Left"/>
-                <ScrollViewer MaxHeight="320" MaxWidth="560"
-                              VerticalScrollBarVisibility="Auto">
-                    <ItemsControl x:Name="InlineItems">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <WrapPanel Orientation="Horizontal"/>
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Grid Width="74" Height="86" Margin="2"
-                                      Background="Transparent"
-                                      Cursor="Hand"
-                                      MouseLeftButtonDown="OnInlineItemDown"
-                                      MouseMove="OnInlineItemMove"
-                                      MouseLeftButtonUp="OnInlineItemUp"
-                                      MouseRightButtonDown="OnInlineItemRightDown">
-                                    <Border x:Name="HoverBg"
-                                            CornerRadius="8"
-                                            Background="Transparent"/>
-                                    <StackPanel VerticalAlignment="Center">
-                                        <Image Source="{Binding Icon}"
-                                               Width="38" Height="38"
-                                               VerticalAlignment="Center"
-                                               RenderOptions.BitmapScalingMode="HighQuality"/>
-                                        <TextBlock Text="{Binding DisplayName}"
-                                                   Foreground="{DynamicResource Theme.Text}"
-                                                   FontSize="11"
-                                                   TextWrapping="Wrap"
-                                                   TextAlignment="Center"
-                                                   MaxHeight="30"
-                                                   Margin="0,4,0,0"
-                                                   VerticalAlignment="Top"
-                                                   ToolTip="{Binding DisplayName}"/>
-                                    </StackPanel>
-                                </Grid>
-                                <DataTemplate.Triggers>
-                                    <Trigger Property="IsMouseOver" Value="True">
-                                        <Setter TargetName="HoverBg" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
-                                    </Trigger>
-                                </DataTemplate.Triggers>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-                </ScrollViewer>
+                <!-- 只有「显示内容」的盒子才在标题栏上挂搜索 / 更多；
+                     隐藏内容的两档由点开面板去用这两个入口，盒子本身保持干净 -->
+                <StackPanel x:Name="BoxActions" Grid.Column="1" Orientation="Horizontal"
+                            VerticalAlignment="Center" Visibility="Collapsed" Margin="10,0,0,0">
+                    <Button x:Name="BoxSearchButton" Style="{StaticResource BoxIconButton}"
+                            Click="OnBoxSearchClick" ToolTip="搜索（Ctrl+F）">
+                        <Path Data="M 6.5,1.6 A 4.9,4.9 0 1 1 6.49,1.61 M 10.2,10.2 L 13.4,13.4"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              StrokeLineJoin="Round" Width="16" Height="16"/>
+                    </Button>
+                    <Button x:Name="BoxMoreButton" Style="{StaticResource BoxIconButton}"
+                            Click="OnBoxMoreClick" ToolTip="更多（右键同菜单）">
+                        <Path Data="M 3,8 L 4.2,8 M 8,8 L 9.2,8 M 13,8 L 14.2,8"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.5" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                              Width="16" Height="16"/>
+                    </Button>
+                </StackPanel>
             </Grid>
-        </Border>
 
-        <!-- 折叠态内容预览：空盒给拖放引导，有内容显示前 3 个文件图标 -->
-        <StackPanel x:Name="PreviewRow" Grid.Row="1" Orientation="Horizontal"
-                    Margin="0,9,0,0" Visibility="Collapsed"
-                    IsHitTestVisible="False">
-            <TextBlock x:Name="PreviewEmptyHint" Text="拖放文件到这里"
-                       Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
-                       VerticalAlignment="Center" Visibility="Collapsed"/>
-            <ItemsControl x:Name="PreviewIcons" Visibility="Collapsed">
+        <!-- 隐藏内容 · 缩略图模式：标题下面挂 3 个文件缩略图 + 总数（原样式） -->
+        <StackPanel x:Name="PreviewHost" Grid.Row="1" Orientation="Horizontal"
+                    Margin="0,7,0,0" Visibility="Collapsed" IsHitTestVisible="False">
+            <ItemsControl x:Name="PreviewIcons">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                         <StackPanel Orientation="Horizontal"/>
@@ -146,7 +160,77 @@
                        Margin="4,0,0,0" VerticalAlignment="Center"/>
         </StackPanel>
 
-        <!-- 右下角调整大小手柄 -->
+        <!-- 内嵌内容网格：展示方式 = 显示内容 时才出现 -->
+        <Border Grid.Row="2" x:Name="GridHost"
+                Visibility="Collapsed"
+                Margin="0,10,0,0">
+            <Grid>
+                <TextBlock x:Name="InlineEmptyHint"
+                           Text="把桌面图标拖进来收纳"
+                           Foreground="{DynamicResource Theme.TextMuted}"
+                           FontSize="12"
+                           Margin="4,6,0,2"
+                           HorizontalAlignment="Left"/>
+                <ScrollViewer MaxHeight="440" MaxWidth="584"
+                              VerticalScrollBarVisibility="Auto">
+                    <ItemsControl x:Name="InlineItems">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <Grid Width="76" Height="88" Margin="2"
+                                      Background="Transparent"
+                                      Cursor="Hand"
+                                      MouseLeftButtonDown="OnInlineItemDown"
+                                      MouseMove="OnInlineItemMove"
+                                      MouseLeftButtonUp="OnInlineItemUp"
+                                      MouseRightButtonDown="OnInlineItemRightDown">
+                                    <Border x:Name="HoverBg"
+                                            CornerRadius="8"
+                                            Background="Transparent"/>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <Image Source="{Binding Icon}"
+                                               Width="36" Height="36"
+                                               VerticalAlignment="Center"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        <!-- 标签固定预留两行：单行名字也不会把下一行图标往上拉，
+                                             整块网格的基线因此是齐的 -->
+                                        <TextBlock Text="{Binding DisplayName}"
+                                                   Foreground="{DynamicResource Theme.TextSecondary}"
+                                                   FontSize="11"
+                                                   LineHeight="14"
+                                                   LineStackingStrategy="BlockLineHeight"
+                                                   TextWrapping="Wrap"
+                                                   TextAlignment="Center"
+                                                   Height="30"
+                                                   Margin="0,6,0,0"
+                                                   VerticalAlignment="Top"
+                                                   ToolTip="{Binding DisplayName}"/>
+                                    </StackPanel>
+                                </Grid>
+                                <DataTemplate.Triggers>
+                                    <Trigger Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="HoverBg" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
+                                    </Trigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </Grid>
+        </Border>
+
+        <!-- 空盒（或拖拽经过）时的单行提示，与缩略图行互斥 -->
+        <TextBlock x:Name="PreviewHint" Grid.Row="1" Text="拖放文件到这里"
+                   Foreground="{DynamicResource Theme.TextMuted}" FontSize="11"
+                   Margin="0,7,0,0" Visibility="Collapsed"
+                   IsHitTestVisible="False"/>
+
+        <!-- 右下角调整大小手柄：常态隐藏，鼠标进卡片才淡入。
+             之前常显 + 3 条 1.4px 斜线贴在圆角上，在薄面卡片里像一段残留符号 -->
         <Thumb Grid.Row="2" x:Name="ResizeGrip"
                Width="16" Height="16"
                HorizontalAlignment="Right" VerticalAlignment="Bottom"
@@ -156,23 +240,30 @@
                DragStarted="OnResizeStarted"
                DragDelta="OnResizeDrag"
                DragCompleted="OnResizeDone">
+            <Thumb.Style>
+                <Style TargetType="Thumb">
+                    <Setter Property="Opacity" Value="0"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsMouseOver, ElementName=RootBorder}" Value="True">
+                            <Setter Property="Opacity" Value="0.6"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Thumb.Style>
             <Thumb.Template>
                 <ControlTemplate TargetType="Thumb">
                     <Grid Background="Transparent">
-                        <Path Data="M 10,14 L 14,10 M 10,10 L 14,6 M 10,6 L 14,2"
-                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.4"
+                        <Path Data="M 8,14 L 14,8 M 12,14 L 14,12"
+                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.2"
+                              StrokeStartLineCap="Round" StrokeEndLineCap="Round"
                               HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
                     </Grid>
                 </ControlTemplate>
             </Thumb.Template>
         </Thumb>
 
-        <!-- 质感层：顶部分类色条 + 底部内暗线，纯装饰不参与命中测试 -->
-        <Rectangle x:Name="AccentBar" Grid.RowSpan="3" Height="2"
-                   VerticalAlignment="Top" Margin="-6,-9,-6,0"
-                   RadiusX="1" RadiusY="1"
-                   Fill="{DynamicResource Theme.Accent}"
-                   IsHitTestVisible="False"/>
+        <!-- 质感层：底部内暗线。顶部那条 2px 分类色条已删除——
+             它没有功能含义，却是整张卡最饱和的颜色，还会戳出 12px 圆角 -->
         <Rectangle x:Name="BottomShade" Grid.RowSpan="3" Height="1"
                    VerticalAlignment="Bottom" Margin="-6,0,-6,-9"
                    Fill="{DynamicResource Theme.Divider}" IsHitTestVisible="False"/>

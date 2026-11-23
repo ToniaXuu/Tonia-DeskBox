@@ -21,6 +21,7 @@ public partial class BoxSettingsWindow : Window
     private readonly ConfigStore _store;
     private readonly List<(Button Btn, string Hex)> _swatches = new();
     private string _selectedColor;
+    private BoxDisplayMode _mode;
     // 可能为空：InitializeComponent() 期间滑杆 ValueChanged 会先触发一次预览
     private AppearanceTheme? _theme;
 
@@ -43,10 +44,61 @@ public partial class BoxSettingsWindow : Window
         RadiusSlider.Value = box.CornerSize;
         TopmostCheck.IsChecked = box.Topmost;
 
+        _mode = box.DisplayMode;
+        SyncModeChips();
+
         BuildSwatches();
         SyncValueBoxes();
         ApplyThemeLock();
+        ApplyPortalNote();
         UpdatePreview();
+    }
+
+    // ---------- 展示方式 ----------
+
+    private void SyncModeChips()
+    {
+        ModePreviewChip.IsChecked = _mode == BoxDisplayMode.Preview;
+        ModeTitleChip.IsChecked = _mode == BoxDisplayMode.TitleOnly;
+        ModeContentChip.IsChecked = _mode == BoxDisplayMode.Content;
+
+        ModeHint.Text = _mode switch
+        {
+            BoxDisplayMode.Preview => "标题 + 最多 3 个缩略图和总数。点盒子不会打开面板，搜索与「更多」直接挂在盒子上。",
+            BoxDisplayMode.TitleOnly => "只留一行标题，最省地方。同样不打开面板。",
+            _ => "盒子内嵌图标网格，点空白处打开面板（原有行为）。宽高尺寸只在这一档生效。",
+        };
+
+        // 尺寸只对「显示内容」有意义，另外两档是自适应宽度
+        bool content = _mode == BoxDisplayMode.Content;
+        WidthSlider.IsEnabled = content;
+        WidthBox.IsEnabled = content;
+        HeightSlider.IsEnabled = content;
+        HeightBox.IsEnabled = content;
+    }
+
+    private void OnModeChipClick(object sender, RoutedEventArgs e)
+    {
+        _mode = sender == ModePreviewChip ? BoxDisplayMode.Preview
+            : sender == ModeTitleChip ? BoxDisplayMode.TitleOnly
+            : BoxDisplayMode.Content;
+
+        // 切到「显示内容」时给一个刚好三列的宽度，否则滑块还停在 0（自适应）会让人以为没生效
+        if (_mode == BoxDisplayMode.Content && WidthSlider.Value < BoxMetrics.ContentMinWidth)
+            WidthSlider.Value = BoxMetrics.ContentMinWidth;
+
+        SyncModeChips();
+        UpdatePreview();
+    }
+
+    /// <summary>映射盒在设置里必须说清楚"文件不归我管"，否则改名时用户会担心搬了目录。</summary>
+    private void ApplyPortalNote()
+    {
+        if (!ConfigStore.IsPortal(_box)) return;
+        NameBox.ToolTip = "映射盒改名只改显示名，不会移动任何文件";
+        AppearanceNote.Text =
+            $"映射盒：显示的是 {_store.SourceDir(_box)} 里的内容，文件始终在原位置。" +
+            "改名只改显示名，不会移动、重命名或删除那个文件夹。";
     }
 
     /// <summary>主题接管底色时，色板与取色按钮不再生效，并说明原因。</summary>
@@ -189,7 +241,7 @@ public partial class BoxSettingsWindow : Window
     private void OnSizeSliderChanged(object sender, RoutedEventArgs e)
     {
         double w = WidthSlider.Value;
-        WidthText.Text = w == 0 ? "自适应" : w < 240 ? "紧凑" : "";
+        WidthText.Text = w == 0 ? "自适应" : "";
         double h = HeightSlider.Value;
         HeightText.Text = h == 0 ? "自适应" : "";
         SyncValueBoxes();
@@ -261,35 +313,47 @@ public partial class BoxSettingsWindow : Window
                 return;
             }
 
-            var oldName = _box.Name;
-            var oldDir = _store.BoxDir(_box);
-            _box.Name = name;
-            var newDir = _store.BoxDir(_box);
-
-            if (Directory.Exists(oldDir) && !string.Equals(oldDir, newDir, StringComparison.OrdinalIgnoreCase))
+            if (ConfigStore.IsPortal(_box))
             {
-                if (FileMover.ExistsConflict(newDir))
+                // 映射盒没有属于自己的目录：改名就只是改名。
+                // 以前这里会按盒子名去搬目录 —— 对映射盒而言那是别人的文件夹，绝对不能动。
+                _box.Name = name;
+            }
+            else
+            {
+                var oldName = _box.Name;
+                var oldDir = _store.BoxDir(_box);
+                _box.Name = name;
+                var newDir = _store.BoxDir(_box);
+
+                if (Directory.Exists(oldDir) && !string.Equals(oldDir, newDir, StringComparison.OrdinalIgnoreCase))
                 {
-                    _box.Name = oldName;
-                    MessageBox.Show(this, $"数据目录中已存在文件夹“{name}”，无法重命名。", "Tonia-DeskBox");
-                    return;
-                }
-                try
-                {
-                    FileMover.MoveTo(oldDir, newDir);
-                }
-                catch (Exception ex)
-                {
-                    _box.Name = oldName;
-                    MessageBox.Show(this, $"重命名失败：{ex.Message}", "Tonia-DeskBox");
-                    return;
+                    if (FileMover.ExistsConflict(newDir))
+                    {
+                        _box.Name = oldName;
+                        MessageBox.Show(this, $"数据目录中已存在文件夹“{name}”，无法重命名。", "Tonia-DeskBox");
+                        return;
+                    }
+                    try
+                    {
+                        FileMover.MoveTo(oldDir, newDir);
+                    }
+                    catch (Exception ex)
+                    {
+                        _box.Name = oldName;
+                        MessageBox.Show(this, $"重命名失败：{ex.Message}", "Tonia-DeskBox");
+                        return;
+                    }
                 }
             }
         }
 
         _box.Opacity = OpacitySlider.Value / 100.0;
         _box.BackColor = _selectedColor;
-        _box.W = WidthSlider.Value;
+        _box.DisplayMode = _mode;
+        _box.W = _mode == BoxDisplayMode.Content
+            ? Math.Max(WidthSlider.Value, BoxMetrics.ContentMinWidth)
+            : WidthSlider.Value;
         _box.H = HeightSlider.Value;
         _box.Rounded = RoundedCheck.IsChecked == true;
         _box.CornerSize = RadiusSlider.Value;

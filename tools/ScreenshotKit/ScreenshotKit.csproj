@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <!-- 仅用于把多张带透明的窗口截图合成到一张背景上（System.Drawing 只在这个开发工具里出现，
+         主工程仍然不含 WinForms / Drawing 依赖） -->
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>ScreenshotKit</AssemblyName>
+    <RootNamespace>ScreenshotKit</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\ToniaDeskBox\ToniaDeskBox.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- UseWindowsForms 只为 System.Drawing 合成图片；它注入的全局 using 会和 WPF 类型撞名
+         （Application / Color / Rectangle…），这里清掉，绘图类型在本文件里按需别名 -->
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+  </ItemGroup>
+
+</Project>

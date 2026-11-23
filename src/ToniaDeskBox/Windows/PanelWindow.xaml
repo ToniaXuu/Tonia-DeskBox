@@ -20,24 +20,31 @@
         DragLeave="OnPanelDragLeave"
         Drop="OnPanelDrop">
     <Window.Resources>
+        <!-- 头部三个图标统一：28×26 命中区、16×16 画布、1.5 描边、2px 间距。
+             常态 TextMuted，悬停升到 Text —— 三个图标的"重量"必须一致，
+             否则 ··· 会比放大镜粗、× 会比放大镜重，一眼就看出没对齐 -->
         <Style x:Key="IconButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource Theme.TextMuted}"/>
             <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="Width" Value="26"/>
-            <Setter Property="Height" Value="22"/>
+            <Setter Property="Width" Value="28"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="Margin" Value="2,0,0,0"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                        <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="7">
                             <ContentPresenter HorizontalAlignment="Center"
                                               VerticalAlignment="Center"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.FillHover}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/>
                             </Trigger>
+                            <!-- 按下要比悬停更深一层；之前按下反而更浅，方向是反的 -->
                             <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.Fill}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Theme.FillStrong}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -74,36 +81,34 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <!-- 顶部强调条：只在内容区内横向铺开。
-                     之前左右各外扩 6px，圆角调大时会戳出圆角边界外 -->
-                <Rectangle x:Name="AccentBar" Grid.RowSpan="5" Height="2"
-                           VerticalAlignment="Top" Margin="0,-8,0,0"
-                           RadiusX="1" RadiusY="1"
-                           Fill="{DynamicResource Theme.Accent}"
-                           IsHitTestVisible="False"/>
+                <!-- 顶部那条 2px 分类色条已删除：它看起来像加载进度条，
+                     而且抢走了标题的注意力。身份色只保留标题前的小圆点。 -->
 
                 <DockPanel Grid.Row="0" Margin="2,0,0,8">
                     <Button x:Name="CloseButton" DockPanel.Dock="Right"
                             Click="OnCloseClick" Style="{StaticResource IconButtonStyle}"
                             ToolTip="关闭">
-                        <Path Data="M 3,3 L 13,13 M 13,3 L 3,13"
-                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.5"
+                        <Path Data="M 4,4 L 12,12 M 12,4 L 4,12"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.5"
                               StrokeStartLineCap="Round" StrokeEndLineCap="Round"
                               Width="16" Height="16"/>
                     </Button>
                     <Button x:Name="MoreButton" DockPanel.Dock="Right"
                             Click="OnMoreClick" Style="{StaticResource IconButtonStyle}"
                             ToolTip="更多">
-                        <Path Data="M 2,8 L 3.2,8 M 8,8 L 9.2,8 M 14,8 L 15.2,8"
-                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.8"
+                        <Path Data="M 3,8 L 4.2,8 M 8,8 L 9.2,8 M 13,8 L 14.2,8"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.5"
                               StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                              Width="18" Height="16"/>
+                              Width="16" Height="16"/>
                     </Button>
                     <Button x:Name="SearchButton" DockPanel.Dock="Right"
                             Click="OnSearchClick" Style="{StaticResource IconButtonStyle}"
                             ToolTip="搜索图标（Ctrl+F）">
                         <Path Data="M 6.5,1.6 A 4.9,4.9 0 1 1 6.49,1.61 M 10.2,10.2 L 13.4,13.4"
-                              Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.5"
+                              Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                              StrokeThickness="1.5"
                               StrokeStartLineCap="Round" StrokeEndLineCap="Round"
                               StrokeLineJoin="Round"
                               Width="16" Height="16"/>
@@ -116,12 +121,12 @@
                                    FontSize="13"
                                    FontWeight="SemiBold"
                                    VerticalAlignment="Center"/>
-                        <Border x:Name="CountBadge" Background="{DynamicResource Theme.AccentBadge}"
+                        <Border x:Name="CountBadge" Background="{DynamicResource Theme.FillStrong}"
                                 CornerRadius="9" MinWidth="22" Height="18"
-                                Margin="9,0,0,0" Padding="7,0"
+                                Margin="8,0,0,0" Padding="7,0"
                                 VerticalAlignment="Center">
                             <TextBlock x:Name="PanelCount"
-                                       Foreground="{DynamicResource Theme.OnAccent}" FontSize="11"
+                                       Foreground="{DynamicResource Theme.Text}" FontSize="11"
                                        FontWeight="SemiBold"
                                        HorizontalAlignment="Center"
                                        VerticalAlignment="Center"/>
@@ -164,7 +169,8 @@
                                 Click="OnSearchClearClick" Style="{StaticResource IconButtonStyle}"
                                 Width="22" Height="22" Margin="0,0,3,0" ToolTip="清空">
                             <Path Data="M 3.5,3.5 L 9.5,9.5 M 9.5,3.5 L 3.5,9.5"
-                                  Stroke="{DynamicResource Theme.Icon}" StrokeThickness="1.4"
+                                  Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                                  StrokeThickness="1.5"
                                   StrokeStartLineCap="Round" StrokeEndLineCap="Round"
                                   Width="13" Height="13"/>
                         </Button>
@@ -236,14 +242,15 @@
                                                        HorizontalAlignment="Center"
                                                        RenderOptions.BitmapScalingMode="HighQuality"/>
                                                 <TextBlock Text="{Binding DisplayName}"
-                                                           Width="76"
+                                                           Width="80"
                                                            HorizontalAlignment="Center"
-                                                           Foreground="{DynamicResource Theme.Text}"
+                                                           Foreground="{DynamicResource Theme.TextSecondary}"
                                                            FontSize="12"
                                                            TextWrapping="Wrap"
-                                                           TextAlignment="Center"
-                                                           MaxHeight="30"
+                                                                   TextAlignment="Center"
+                                                           Height="30"
                                                            LineHeight="14"
+                                                           LineStackingStrategy="BlockLineHeight"
                                                            Margin="0,6,0,0"
                                                            VerticalAlignment="Top"
                                                            ToolTip="{Binding DisplayName}"/>
