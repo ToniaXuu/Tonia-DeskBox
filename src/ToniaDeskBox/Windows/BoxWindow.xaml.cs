@@ -571,16 +571,15 @@ public partial class BoxWindow : Window
     /// <summary>标题栏上的放大镜：面板没开就开「搜索态面板」，已开就地展开搜索栏。</summary>
     private void OnBoxSearchClick(object sender, RoutedEventArgs e)
     {
-        if (_panel != null)
+        // 正在收起的旧面板已经 Hide 了，不能再拿它 ShowSearchBar —— 那会激活一个不可见窗口
+        if (_panel is { IsClosing: false })
         {
             _panel.ShowSearchBar();
             _panel.Activate();
             return;
         }
 
-        _panel = new PanelWindow(this, Box, _config, _store, PanelOpenMode.Search);
-        _panel.Closed += (_, _) => _panel = null;
-        _panel.Show();
+        OpenPanel(PanelOpenMode.Search);
     }
 
     private ContextMenu BuildContextMenu()
@@ -747,15 +746,25 @@ public partial class BoxWindow : Window
 
     public void TogglePanel()
     {
-        if (_panel != null)
+        // 正在收起的旧面板不算"已打开"：它的窗口已经 Hide 掉了，
+        // 这时再点盒子应当立刻弹新的，而不是把关闭请求又吞一次（用户视角是"点了没反应"）
+        if (_panel is { IsClosing: false })
         {
             // 走面板自己的幂等关闭入口，避免与失焦关闭撞在同一帧
             _panel.ClosePanel();
             return;
         }
-        _panel = new PanelWindow(this, Box, _config, _store);
-        _panel.Closed += (_, _) => _panel = null;
-        _panel.Show();
+        OpenPanel(PanelOpenMode.Browse);
+    }
+
+    private void OpenPanel(PanelOpenMode mode)
+    {
+        var panel = new PanelWindow(this, Box, _config, _store, mode);
+        _panel = panel;
+        // 收起过的旧窗口销毁是延后一点的，其间可能已经有新面板顶上来；
+        // 无条件把 _panel 置 null 会抹掉新面板的引用（之后点盒子就再也弹不出来了）
+        panel.Closed += (_, _) => { if (ReferenceEquals(_panel, panel)) _panel = null; };
+        panel.Show();
     }
 
     public void SnapPanel() => _panel?.FollowOwner();

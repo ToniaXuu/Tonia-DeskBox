@@ -307,5 +307,15 @@
                            Margin="2,10,0,0" HorizontalAlignment="Center"/>
             </Grid>
         </Border>
+
+        <!-- 气泡箭头：指向所属盒子，让"这个面板从哪来"一眼可辨。
+             放在内容层之外、投影留白之内 —— Canvas 不裁剪子元素，所以能伸出内容区，
+             又因为它在 OuterGrid 里，缩放动画时会跟面板一起变换（锚点正好是盒子方向）。 -->
+        <Canvas x:Name="PointerLayer" IsHitTestVisible="False">
+            <Path x:Name="PointerFill" Visibility="Collapsed"
+                  Fill="{DynamicResource Theme.Surface}"/>
+            <Path x:Name="PointerEdge" Visibility="Collapsed" StrokeThickness="1"
+                  Stroke="{DynamicResource Theme.Border}"/>
+        </Canvas>
     </Grid>
 </Window>

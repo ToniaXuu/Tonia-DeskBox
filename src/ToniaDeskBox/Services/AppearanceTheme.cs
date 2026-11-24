@@ -179,10 +179,15 @@ public sealed class AppearanceTheme
                     element.ActualWidth, element.ActualHeight);
             }
 
-            foreach (Window win in Application.Current.Windows)
+            var app = Application.Current;
+            if (app == null) return false;
+
+            foreach (Window win in app.Windows)
             {
                 if (!win.IsVisible || ReferenceEquals(win, exclude)) continue;
                 if (win.WindowState == WindowState.Minimized) continue;
+                // 正在缩回的面板不算压住：菜单弹出时旧面板刚好在收缩，会被误判成重叠
+                if (win is ToniaDeskBox.Windows.PanelWindow { IsClosing: true }) continue;
 
                 var other = new Rect(win.Left, win.Top, win.ActualWidth, win.ActualHeight);
                 var hit = Rect.Intersect(self, other);

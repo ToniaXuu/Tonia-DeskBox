@@ -34,6 +34,8 @@ internal static class Program
         ImportServiceTests.Run();
         ExtraTests.Run();
         DisplayModeTests.Run();
+        TidyRestoreTests.Run();
+        BoxPlacementTests.Run();
 
         Console.WriteLine(new string('=', 60));
         Console.WriteLine($"通过 {_passed} 个，失败 {_failed} 个");
@@ -599,6 +601,434 @@ internal static class DisplayModeTests
             store.Save(loaded);
             var again = store.Load();
             Program.Equal(BoxDisplayMode.TitleOnly, again.Boxes[0].DisplayMode, "再次加载应保留用户选择");
+        });
+    }
+}
+
+/// <summary>
+/// 一键整理 / 一键恢复：快照、备份边界、恢复计划。
+///
+/// 这三块都直接操作用户的真实文件，出错代价最高，所以必须有用例兜住：
+/// 尤其「只备份本次参与整理的条目」—— 用户没勾的文件被动到了，信任就没了。
+/// </summary>
+internal static class TidyRestoreTests
+{
+    public static void Run()
+    {
+        Console.WriteLine("\n[一键整理 / 恢复] 快照、备份边界与恢复计划");
+
+        Program.Case("没有整理记录 → 返回 null 且不算错误（用于区分「从没整理过」）", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-none");
+            var cfg = tmp.MkDir("cfg");
+
+            var loaded = TidyStateStore.TryLoad(cfg, out var error);
+            Program.Check(loaded == null, "没有记录时应返回 null");
+            Program.Equal("", error, "没有记录不是错误，不该给用户报错文案");
+        });
+
+        Program.Case("快照往返：中文名、图标坐标、备份信息都不丢", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-state");
+            var cfg = tmp.MkDir("cfg");
+
+            var state = new TidyState
+            {
+                CreatedAt = new DateTime(2026, 11, 24, 10, 30, 0),
+                LayoutCaptured = true,
+                AutoArrange = false,
+                Icons = new List<DesktopIconPos>
+                {
+                    new() { Name = "会议纪要.txt", X = 26, Y = 173 },
+                    new() { Name = "Qoder CN IDE.lnk", X = 2610, Y = 344 },
+                },
+                Items = new List<TidyRestoreItem>
+                {
+                    new()
+                    {
+                        Name = "会议纪要.txt",
+                        OriginalPath = @"C:\Users\a\Desktop\会议纪要.txt",
+                        BoxPath = @"D:\box\文档\会议纪要.txt",
+                        BoxName = "文档",
+                    },
+                },
+                BackupDir = @"C:\cfg\tidy-backups\20261124-103000",
+                BackupFiles = 1,
+                BackupBytes = 1234,
+            };
+
+            TidyStateStore.Save(cfg, state);
+            var loaded = TidyStateStore.TryLoad(cfg, out var error);
+
+            Program.Check(loaded != null, "应能读回快照：" + error);
+            Program.Equal(2, loaded!.Icons.Count, "图标数");
+            Program.Equal("会议纪要.txt", loaded.Icons[0].Name, "中文名不应被转义或截断");
+            Program.Equal(173, loaded.Icons[0].Y, "图标坐标");
+            Program.Equal(1, loaded.Items.Count, "条目数");
+            Program.Equal("文档", loaded.Items[0].BoxName, "目标盒子");
+            Program.Equal(1, loaded.BackupFiles, "备份文件数");
+            Program.Check(!loaded.AutoArrange, "自动排列状态");
+            Program.Check(loaded.LayoutCaptured, "布局已记录标记");
+        });
+
+        Program.Case("快照损坏 → 返回 null 并给出可读原因", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-bad");
+            var cfg = tmp.MkDir("cfg");
+            File.WriteAllText(Path.Combine(cfg, TidyStateStore.FileName), "{ 这显然不是 json");
+
+            var loaded = TidyStateStore.TryLoad(cfg, out var error);
+            Program.Check(loaded == null, "损坏的快照不能被当成有效记录");
+            Program.Check(error.Length > 0, "必须说明为什么读不出来");
+        });
+
+        Program.Case("备份只复制传进来的条目，未参与整理的文件不动", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-backup");
+            var desktop = tmp.MkDir("desktop");
+            var cfg = tmp.MkDir("cfg");
+            var tidy = Path.Combine(desktop, "要整理的.txt");
+            var keep = Path.Combine(desktop, "不动的.txt");
+            File.WriteAllText(tidy, "要搬走的");
+            File.WriteAllText(keep, "不能被碰");
+
+            var result = TidyBackupService.Create(new[] { tidy }, cfg, "s1");
+
+            Program.Equal(1, result.Files, "只备份 1 个文件");
+            Program.Check(File.Exists(Path.Combine(result.Dir, "要整理的.txt")), "勾选的条目应有副本");
+            Program.Check(!File.Exists(Path.Combine(result.Dir, "不动的.txt")), "没勾的文件不得被备份");
+            Program.Check(File.Exists(keep), "没勾的文件仍在桌面原位");
+            Program.Equal("不能被碰", File.ReadAllText(keep), "没勾的文件内容不得被改");
+            Program.Equal("要搬走的", File.ReadAllText(tidy), "备份是复制，源文件不动");
+        });
+
+        Program.Case("备份目录里的子文件也一并复制（文件夹条目）", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-backup-dir");
+            var desktop = tmp.MkDir("desktop");
+            var cfg = tmp.MkDir("cfg");
+            var folder = tmp.MkDir(@"desktop\资料夹");
+            File.WriteAllText(Path.Combine(folder, "a.txt"), "A");
+            Directory.CreateDirectory(Path.Combine(folder, "子目录"));
+            File.WriteAllText(Path.Combine(folder, "子目录", "b.txt"), "B");
+
+            var result = TidyBackupService.Create(new[] { folder }, cfg, "s1");
+
+            Program.Equal(2, result.Files, "递归计入 2 个文件");
+            Program.Check(File.Exists(Path.Combine(result.Dir, "资料夹", "a.txt")), "顶层文件");
+            Program.Check(File.Exists(Path.Combine(result.Dir, "资料夹", "子目录", "b.txt")), "子目录文件");
+        });
+
+        Program.Case("恢复计划：盒子 / 备份 / 找不到 三态判定", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-plan");
+            var desktop = tmp.MkDir("desktop");
+            var box = tmp.MkDir("box");
+            var cfg = tmp.MkDir("cfg");
+            var backupDir = Path.Combine(cfg, "tidy-backups", "s1");
+            Directory.CreateDirectory(backupDir);
+
+            File.WriteAllText(Path.Combine(box, "a.txt"), "a");
+            File.WriteAllText(Path.Combine(backupDir, "b.txt"), "b");
+
+            var state = new TidyState
+            {
+                BackupDir = backupDir,
+                LayoutCaptured = true,
+                Items = new List<TidyRestoreItem>
+                {
+                    Item(desktop, box, "a.txt"),
+                    Item(desktop, box, "b.txt"),
+                    Item(desktop, box, "c.txt"),
+                },
+            };
+
+            var plan = TidyRestoreService.BuildPlan(state, desktop);
+
+            Program.Equal(2, plan.RestorableCount, "可恢复 2 项");
+            Program.Equal(1, plan.FromBackupCount, "其中 1 项只能靠备份");
+            Program.Equal(1, plan.MissingCount, "1 项哪里都找不到");
+            Program.Equal(TidyRestoreOrigin.Box, plan.Items[0].Origin, "a 从盒子搬回");
+            Program.Equal(TidyRestoreOrigin.Backup, plan.Items[1].Origin, "b 从备份复制");
+            Program.Equal(TidyRestoreOrigin.Missing, plan.Items[2].Origin, "c 不可恢复");
+            Program.Check(plan.Items[2].Problem.Contains("c.txt"), "缺失项要指明是哪个文件");
+        });
+
+        Program.Case("恢复执行：搬回桌面、同名跳过、缺失记失败并给出原因", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-restore");
+            var desktop = tmp.MkDir("desktop");
+            var box = tmp.MkDir("box");
+            var cfg = tmp.MkDir("cfg");
+            var backupDir = Path.Combine(cfg, "tidy-backups", "s1");
+            Directory.CreateDirectory(backupDir);
+
+            File.WriteAllText(Path.Combine(box, "a.txt"), "a");
+            File.WriteAllText(Path.Combine(backupDir, "b.txt"), "b");
+            // 桌面上已经有 a.txt：恢复不得覆盖
+            File.WriteAllText(Path.Combine(desktop, "a.txt"), "桌面上的");
+
+            var state = new TidyState
+            {
+                BackupDir = backupDir,
+                LayoutCaptured = true,
+                Items = new List<TidyRestoreItem>
+                {
+                    Item(desktop, box, "a.txt"),
+                    Item(desktop, box, "b.txt"),
+                    Item(desktop, box, "c.txt"),
+                },
+            };
+
+            var result = TidyRestoreService.Execute(
+                TidyRestoreService.BuildPlan(state, desktop));
+
+            Program.Equal(1, result.Restored, "b 成功放回");
+            Program.Equal(1, result.Skipped, "a 因桌面同名跳过");
+            Program.Equal(1, result.Failed, "c 无法恢复");
+            Program.Equal("桌面上的", File.ReadAllText(Path.Combine(desktop, "a.txt")),
+                "同名文件绝不能被覆盖");
+            Program.Equal("b", File.ReadAllText(Path.Combine(desktop, "b.txt")),
+                "从备份复制的内容应完整");
+            Program.Check(File.Exists(Path.Combine(box, "a.txt")), "跳过的条目应留在盒子里");
+        });
+
+        Program.Case("没有布局记录时仍能恢复文件（不能因为布局失败就整条链路中断）", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-nolayout");
+            var desktop = tmp.MkDir("desktop");
+            var box = tmp.MkDir("box");
+            var cfg = tmp.MkDir("cfg");
+
+            File.WriteAllText(Path.Combine(box, "a.txt"), "a");
+
+            var state = new TidyState
+            {
+                LayoutCaptured = false,
+                LayoutError = "找不到桌面图标列表",
+                Items = new List<TidyRestoreItem> { Item(desktop, box, "a.txt") },
+            };
+
+            var plan = TidyRestoreService.BuildPlan(state, desktop);
+            var result = TidyRestoreService.Execute(plan);
+
+            Program.Equal(1, result.Restored, "布局失败不影响文件恢复");
+            Program.Check(File.Exists(Path.Combine(desktop, "a.txt")), "文件已回桌面");
+        });
+
+        static TidyRestoreItem Item(string desktop, string box, string name) => new()
+        {
+            Name = name,
+            OriginalPath = Path.Combine(desktop, name),
+            BoxPath = Path.Combine(box, name),
+            BoxName = "文档",
+        };
+    }
+}
+
+/// <summary>
+/// 整理时的「新盒子落位」与恢复后的「空盒子清理」。
+///
+/// 这两块都是纯逻辑（不碰窗口、不碰真实桌面），所以能直接断言：
+/// 新盒子绝不与已有元素重叠、已有盒子坐标一个都不动、
+/// 只有「本次恢复涉及 + 目录确实空了」的盒子才会被删。
+/// </summary>
+internal static class BoxPlacementTests
+{
+    public static void Run()
+    {
+        Console.WriteLine("\n[整理落位 / 空盒子清理]");
+
+        var work = new BoxArea(0, 0, 1280, 800);
+
+        Program.Case("空桌面：新盒子落在工作区左上并留出边距", () =>
+        {
+            var (x, y) = BoxPlacementService.FindFreeSpot(work, 200, 100);
+            Program.Equal(BoxPlacementService.EdgeMargin, x, "X 贴左边距");
+            Program.Equal(BoxPlacementService.EdgeMargin, y, "Y 贴上边距");
+        });
+
+        Program.Case("已有盒子占住左上：新盒子另找空地且不压住它", () =>
+        {
+            var existing = new BoxArea(16, 16, 210, 96);
+            var (x, y) = BoxPlacementService.FindFreeSpot(work, 210, 96, new[] { existing });
+            var placed = new BoxArea(x, y, 210, 96);
+
+            Program.Check(!placed.Overlaps(existing, BoxPlacementService.Gap), "不得与已有盒子重叠");
+            Program.Check(x >= work.X + BoxPlacementService.EdgeMargin, "不越左界");
+            Program.Check(placed.Right <= work.Right - BoxPlacementService.EdgeMargin, "不越右界");
+            Program.Check(placed.Bottom <= work.Bottom - BoxPlacementService.EdgeMargin, "不越下界");
+        });
+
+        Program.Case("第一行放满后自动换到第二行", () =>
+        {
+            var existing = new[]
+            {
+                new BoxArea(16, 16, 600, 96),
+                new BoxArea(628, 16, 600, 96),
+            };
+            var (_, y) = BoxPlacementService.FindFreeSpot(work, 210, 96, existing);
+            Program.Check(y >= 124, $"应落到第一行下方（实际 y={y:0}）");
+        });
+
+        Program.Case("一次整理建 4 个盒子：彼此不重叠，也不碰已有盒子", () =>
+        {
+            var existing = new BoxArea(400, 300, 300, 200);
+            var placed = BoxPlacementService.Arrange(work, new[] { existing },
+                new (double, double)[] { (210, 96), (210, 96), (210, 96), (210, 96) });
+
+            Program.Equal(4, placed.Count, "排了 4 个");
+            for (int i = 0; i < placed.Count; i++)
+            {
+                Program.Check(!placed[i].Overlaps(existing, BoxPlacementService.Gap), $"第 {i + 1} 个压住了已有盒子");
+                for (int k = 0; k < i; k++)
+                    Program.Check(!placed[i].Overlaps(placed[k], BoxPlacementService.Gap), $"第 {i + 1} 个与第 {k + 1} 个重叠");
+                Program.Check(placed[i].Right <= work.Right, $"第 {i + 1} 个越右界");
+                Program.Check(placed[i].Bottom <= work.Bottom, $"第 {i + 1} 个越下界");
+            }
+        });
+
+        Program.Case("排布不会改动已有盒子的坐标", () =>
+        {
+            var existing = new List<BoxArea> { new(500, 260, 240, 120) };
+            var before = existing[0];
+
+            BoxPlacementService.Arrange(work, existing, new (double, double)[] { (210, 96), (210, 96) });
+
+            Program.Equal(before, existing[0], "已有盒子坐标必须原样保留");
+        });
+
+        Program.Case("盒子比工作区还大：压进可用区域，不产生越界或非数值坐标", () =>
+        {
+            var (x, y) = BoxPlacementService.FindFreeSpot(work, 5000, 5000);
+            Program.Check(!double.IsNaN(x) && !double.IsNaN(y), "坐标不能是 NaN");
+            Program.Check(x >= work.X && y >= work.Y, "不越左上界");
+            Program.Check(x <= work.Right && y <= work.Bottom, "不越右下界");
+        });
+
+        Program.Case("桌面完全塞满：返回重叠面积最小的位置，而不是丢弃整块", () =>
+        {
+            var tiny = new BoxArea(0, 0, 300, 120);
+            var blocker = new BoxArea(0, 0, 300, 120);
+
+            var (x, y) = BoxPlacementService.FindFreeSpot(tiny, 200, 80, new[] { blocker });
+
+            Program.Check(!double.IsNaN(x) && !double.IsNaN(y), "仍要给出一个坐标");
+            Program.Check(x >= tiny.X && y >= tiny.Y && x + 200 <= tiny.Right + 1, "仍留在工作区内");
+        });
+
+        Program.Case("空目录判定：只有 desktop.ini / Thumbs.db 视为空，有子目录不算空", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-empty");
+
+            var empty = tmp.MkDir("empty");
+            Program.Check(TidyBoxCleanupService.IsEmpty(empty), "空目录");
+
+            var sysOnly = tmp.MkDir("sys");
+            File.WriteAllText(Path.Combine(sysOnly, "desktop.ini"), "x");
+            File.WriteAllText(Path.Combine(sysOnly, "Thumbs.db"), "x");
+            Program.Check(TidyBoxCleanupService.IsEmpty(sysOnly), "系统占位文件不算内容");
+
+            var withFile = tmp.MkDir("with-file");
+            File.WriteAllText(Path.Combine(withFile, "a.txt"), "a");
+            Program.Check(!TidyBoxCleanupService.IsEmpty(withFile), "有文件不算空");
+
+            var withSub = tmp.MkDir("with-sub");
+            Directory.CreateDirectory(Path.Combine(withSub, "子目录"));
+            Program.Check(!TidyBoxCleanupService.IsEmpty(withSub), "有空子目录也保留（保守）");
+
+            Program.Check(!TidyBoxCleanupService.IsEmpty(Path.Combine(tmp.Path, "不存在")),
+                "目录不存在时不得判定为空（异常状态不该顺手删配置）");
+        });
+
+        Program.Case("恢复后清理：只删本次涉及且真的空了的盒子，映射盒与重复名都被排除", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-cleanup");
+            var empty = tmp.MkDir("box-empty");
+            var full = tmp.MkDir("box-full");
+            File.WriteAllText(Path.Combine(full, "留下.txt"), "还在用");
+
+            var dirs = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["文档"] = empty,
+                ["图片"] = full,
+                ["映射盒"] = null,          // 映射盒：dirOf 返回 null，不参与清理
+            };
+
+            var emptied = TidyBoxCleanupService.FindEmptiedBoxes(
+                new[] { "文档", "图片", "映射盒", "文档", "完全不存在的盒子" },
+                name => dirs.TryGetValue(name, out var d) ? d : null);
+
+            Program.Equal(1, emptied.Count, "只应删 1 个");
+            Program.Equal("文档", emptied[0], "被删的是空盒子");
+        });
+
+        Program.Case("图标与移动清单的名字匹配：显示名可能没有扩展名", () =>
+        {
+            var moving = new List<string> { "报告.pdf", "Qoder CN IDE.lnk", "项目资料" };
+
+            Program.Check(DesktopTidyService.IconWillMove("报告", moving),
+                "Explorer 隐藏扩展名时显示名是「报告」，也要认出来");
+            Program.Check(DesktopTidyService.IconWillMove("报告.pdf", moving),
+                "没隐藏扩展名时显示名就是全名");
+            Program.Check(DesktopTidyService.IconWillMove("qoder cn ide", moving),
+                "大小写不敏感");
+            Program.Check(DesktopTidyService.IconWillMove("项目资料", moving),
+                "文件夹名原样匹配");
+            Program.Check(!DesktopTidyService.IconWillMove("回收站", moving),
+                "不在清单里的图标必须保留");
+            Program.Check(!DesktopTidyService.IconWillMove("报告2", moving),
+                "前缀相同但名字不同，不能误判");
+        });
+
+        Program.Case("端到端：恢复把文件搬回后盒子判空；恢复被跳过的盒子仍有货，不删", () =>
+        {
+            using var tmp = new Program.TempDir("tidy-e2e");
+            var desktop = tmp.MkDir("desktop");
+            var boxDoc = tmp.MkDir("box-doc");
+            var boxImg = tmp.MkDir("box-img");
+
+            File.WriteAllText(Path.Combine(boxDoc, "已恢复.txt"), "a");
+            File.WriteAllText(Path.Combine(boxImg, "会被跳过.txt"), "b");
+            // 桌面上预先放一份同名：恢复会跳过，盒子那份必须留着
+            File.WriteAllText(Path.Combine(desktop, "会被跳过.txt"), "桌面上的");
+
+            var state = new TidyState
+            {
+                Items = new List<TidyRestoreItem>
+                {
+                    new()
+                    {
+                        Name = "已恢复.txt",
+                        OriginalPath = Path.Combine(desktop, "已恢复.txt"),
+                        BoxPath = Path.Combine(boxDoc, "已恢复.txt"),
+                        BoxName = "文档",
+                    },
+                    new()
+                    {
+                        Name = "会被跳过.txt",
+                        OriginalPath = Path.Combine(desktop, "会被跳过.txt"),
+                        BoxPath = Path.Combine(boxImg, "会被跳过.txt"),
+                        BoxName = "图片",
+                    },
+                },
+            };
+
+            var result = TidyRestoreService.Execute(TidyRestoreService.BuildPlan(state, desktop));
+            Program.Equal(1, result.Restored, "只有 1 项成功放回");
+            Program.Equal(1, result.Skipped, "同名的那项跳过");
+
+            var dirs = new Dictionary<string, string?>
+            {
+                ["文档"] = boxDoc,
+                ["图片"] = boxImg,
+            };
+            var emptied = TidyBoxCleanupService.FindEmptiedBoxes(new[] { "文档", "图片" }, n => dirs[n]);
+
+            Program.Equal(1, emptied.Count, "只有搬空的「文档」该被清理");
+            Program.Equal("文档", emptied[0], "被清理的盒子名");
+            Program.Check(File.Exists(Path.Combine(boxImg, "会被跳过.txt")),
+                "恢复被跳过的盒子必须原样保留");
         });
     }
 }

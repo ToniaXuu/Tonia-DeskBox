@@ -19,7 +19,7 @@
          程序内「关于」三处必须一致，改版本只需改这一行 + installer 里的同名默认值。
          AssemblyVersion / FileVersion / InformationalVersion 全部由它推导，
          这样 CI 用 -p:Version=x.y.z 注入时，文件属性也会跟着变。 -->
-    <Version>0.3.0</Version>
+    <Version>0.3.1</Version>
     <Product>Tonia-DeskBox</Product>
     <AssemblyTitle>Tonia-DeskBox</AssemblyTitle>
     <Description>桌面盒子整理工具</Description>
@@ -27,11 +27,22 @@
     <Copyright>Copyright © 2026 Tonia</Copyright>
 
     <!-- 默认会在 InformationalVersion 后面拼 "+提交哈希"，更新检查要按语义版本比较，
-         这里关掉，保证 AssemblyInformationalVersion 就是干净的 0.3.0 -->
+         这里关掉，保证 AssemblyInformationalVersion 就是干净的 0.3.1 -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
 
     <SatelliteResourceLanguages>zh-Hans</SatelliteResourceLanguages>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 开发工具（离屏渲染 / 验证）需要读取内部状态做断言，比如面板是否因重叠转成不透明。
+         只放行这两个工具程序集，产品代码不对外暴露。 -->
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>ScreenshotKit</_Parameter1>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Runtime.CompilerServices.InternalsVisibleTo">
+      <_Parameter1>ToniaDeskBox.Tests</_Parameter1>
+    </AssemblyAttribute>
+  </ItemGroup>
 
   <ItemGroup>
     <!-- app.ico 只用于编译期写入 exe 的 Win32 图标，固定浅色版 -->

@@ -34,6 +34,7 @@ public class TrayService : IDisposable
     public event Action? ShowAllRequested;
     public event Action? HideAllRequested;
     public event Action? TidyRequested;
+    public event Action? RestoreRequested;
     public event Action? AutoSortRequested;
     public event Action<bool>? AutoStartToggled;
     public event Action? GlobalSettingsRequested;
@@ -97,6 +98,7 @@ public class TrayService : IDisposable
         AddItem(menu, "隐藏全部", () => HideAllRequested?.Invoke());
         menu.Items.Add(new Separator());
         AddItem(menu, "一键整理桌面…", () => TidyRequested?.Invoke());
+        AddItem(menu, "一键恢复桌面…", () => RestoreRequested?.Invoke());
         AddItem(menu, "整理盒子", () => AutoSortRequested?.Invoke());
         menu.Items.Add(new Separator());
         AddItem(menu, "全局盒子设置…", () => GlobalSettingsRequested?.Invoke());

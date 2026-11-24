@@ -28,6 +28,16 @@ public partial class App : Application
     private readonly List<BoxWindow> _boxWindows = new();
     private DispatcherTimer? _healTimer;
     private bool _startupCompleted;
+
+    /// <summary>
+    /// 「一键整理」期间的落位会话：非 null 时，新建盒子按这份障碍清单找空地。
+    /// 清单里的已有盒子坐标**只读不改**，新盒子只是追加进来，所以一次整理建出的
+    /// 多个盒子彼此也不会叠在一起。对话框关闭后置回 null，普通新建仍走原来的级联摆放。
+    /// </summary>
+    private List<BoxArea>? _tidyObstacles;
+
+    /// <summary>本轮整理是否已把「未搬走的桌面图标」加进障碍集（避免重复叠加）。</summary>
+    private bool _tidyIconsAdded;
     /// <summary>导出/导入进行中：托盘菜单可以反复点，必须挡住重复任务（两者都会动数据目录）。</summary>
     private bool _transferBusy;
 
@@ -167,6 +177,7 @@ public partial class App : Application
         _tray.ShowAllRequested += ShowAll;
         _tray.HideAllRequested += HideAll;
         _tray.TidyRequested += TidyDesktop;
+        _tray.RestoreRequested += RestoreDesktop;
         _tray.AutoSortRequested += AutoSortBoxes;
         _tray.AutoStartToggled += OnAutoStartToggled;
         _tray.GlobalSettingsRequested += OpenGlobalSettings;
@@ -342,13 +353,14 @@ public partial class App : Application
         }
     }
 
-    private void ShowBox(BoxConfig box)
+    private BoxWindow ShowBox(BoxConfig box)
     {
         var w = new BoxWindow(box, Config, Store);
         w.BoxDeleted += OnBoxDeleted;
         _boxWindows.Add(w);
         w.Show();
         if (box.Hidden) w.Hide();
+        return w;
     }
 
     public void RecreateBox(BoxConfig box)
@@ -429,6 +441,152 @@ public partial class App : Application
         box.X = 120 + n * 26;
         box.Y = 120 + n * 20;
         ClampIntoWorkArea(box);
+    }
+
+    // ---------- 整理时的新盒子落位 ----------
+
+    /// <summary>进入「一键整理」的落位会话：抓一份当前桌面占用情况当障碍。</summary>
+    private void BeginTidyPlacement()
+    {
+        _tidyObstacles = CollectOccupiedAreas();
+        _tidyIconsAdded = false;
+    }
+
+    private void EndTidyPlacement()
+    {
+        _tidyObstacles = null;
+        _tidyIconsAdded = false;
+    }
+
+    /// <summary>
+    /// 把「整理后仍留在桌面」的图标也加入障碍集 —— 新盒子不该盖在用户还要点的快捷方式上。
+    ///
+    /// 只在第一次建盒子前生效：这份矩形来自整理前的桌面布局，文件搬走之后它们就不代表现状了；
+    /// 而且一轮整理里要连续建多个盒子，重复叠加会让障碍集膨胀。
+    /// </summary>
+    private void AddKeptIconObstacles(IReadOnlyList<BoxArea> keepIcons)
+    {
+        var obstacles = _tidyObstacles;
+        if (obstacles == null || _tidyIconsAdded) return;
+        _tidyIconsAdded = true;
+
+        foreach (var area in keepIcons)
+        {
+            if (area.W <= 0 || area.H <= 0) continue;
+            obstacles.Add(area);
+        }
+    }
+
+    /// <summary>主屏工作区（已排除任务栏），换成不依赖 WPF 的矩形给落位服务用。</summary>
+    private static BoxArea WorkAreaArea()
+    {
+        var wa = SystemParameters.WorkArea;
+        return new BoxArea(wa.X, wa.Y, wa.Width, wa.Height);
+    }
+
+    /// <summary>
+    /// 当前桌面上已经被占住的地方：可见盒子的实际矩形（没打开窗口的按配置坐标 + 估算尺寸），
+    /// 以及已展开的面板 —— 面板是盒子的一部分，压住它同样会挡住内容。
+    ///
+    /// 隐藏的盒子不计入：它此刻不在屏幕上，为它留空位只会把新盒子挤到奇怪的地方。
+    /// </summary>
+    private List<BoxArea> CollectOccupiedAreas()
+    {
+        var areas = new List<BoxArea>();
+
+        foreach (var box in Config.Boxes)
+        {
+            if (box.Hidden) continue;
+
+            var win = _boxWindows.FirstOrDefault(x => ReferenceEquals(x.Box, box));
+            if (win is { IsVisible: true } && win.ActualWidth > 0 && win.ActualHeight > 0)
+            {
+                areas.Add(new BoxArea(win.Left, win.Top, win.ActualWidth, win.ActualHeight));
+                continue;
+            }
+
+            // 窗口还没建/刚被隐藏：用配置坐标 + 估算尺寸。估宽略大于实际常见值，
+            // 宁可多留一点缝，也不要因为估小了而和其他盒子贴上
+            areas.Add(new BoxArea(box.X, box.Y,
+                box.W > 0 ? box.W : BoxPlacementService.DefaultWidth,
+                box.H > 0 ? box.H : BoxPlacementService.DefaultHeight));
+        }
+
+        foreach (var win in Windows.OfType<PanelWindow>())
+        {
+            if (!win.IsVisible || win.ActualWidth <= 0 || win.ActualHeight <= 0) continue;
+            areas.Add(new BoxArea(win.Left, win.Top, win.ActualWidth, win.ActualHeight));
+        }
+
+        return areas;
+    }
+
+    /// <summary>给整理新建的盒子挑一块空地，并把它记进障碍集（下一个新盒子会避开它）。</summary>
+    private BoxArea PlaceTidyBox(BoxConfig box)
+    {
+        var obstacles = _tidyObstacles ?? new List<BoxArea>();
+        double w = box.W > 0 ? box.W : BoxPlacementService.DefaultWidth;
+        double h = box.H > 0 ? box.H : BoxPlacementService.DefaultHeight;
+
+        var (x, y) = BoxPlacementService.FindFreeSpot(WorkAreaArea(), w, h, obstacles);
+        box.X = x;
+        box.Y = y;
+
+        var area = new BoxArea(x, y, w, h);
+        _tidyObstacles?.Add(area);
+        return area;
+    }
+
+    /// <summary>
+    /// 窗口显示后用**实测尺寸**复核一次位置。
+    ///
+    /// 自适应盒子（SizeToContent）在创建前量不到真实宽高，估算值只够"先摆对大致位置"；
+    /// 标题一长盒子就变宽，可能刚好压到隔壁。这一步只挪**这个新盒子**，已有盒子依旧不动。
+    /// </summary>
+    private void RefineTidyBoxPlacement(BoxConfig box, BoxWindow? window, BoxArea estimate)
+    {
+        var obstacles = _tidyObstacles;
+        if (obstacles == null || window == null) return;
+
+        double w = window.ActualWidth > 0 ? window.ActualWidth : box.W;
+        double h = window.ActualHeight > 0 ? window.ActualHeight : box.H;
+        if (w <= 0 || h <= 0) return;
+
+        // 先把自己先前占的估算矩形摘掉（按引用值精确匹配），否则会和自己相撞
+        obstacles.RemoveAll(a => a == estimate);
+
+        var actual = new BoxArea(window.Left, window.Top, w, h);
+        bool clash = obstacles.Any(o => actual.Overlaps(o, BoxPlacementService.Gap));
+
+        if (clash)
+        {
+            // 就近重排：实测比估算大是常事，此时只该在原地附近挪一点，
+            // 而不是跳回屏幕另一头的空位
+            var (x, y) = BoxPlacementService.FindFreeSpot(
+                WorkAreaArea(), w, h, obstacles, (window.Left, window.Top));
+            box.X = x;
+            box.Y = y;
+            try
+            {
+                window.Left = x;
+                window.Top = y;
+            }
+            catch (InvalidOperationException)
+            {
+                // 窗口正在关闭：位置记进配置即可，下次打开会落在正确的地方
+            }
+            actual = new BoxArea(x, y, w, h);
+            try { Store.Save(Config); }
+            catch (Exception ex) { Store.Log($"整理后保存盒子位置失败：{ex.Message}"); }
+        }
+        else
+        {
+            // Loaded 里的 ClampIntoScreen 可能微调过窗口，以实际位置为准
+            box.X = window.Left;
+            box.Y = window.Top;
+        }
+
+        obstacles.Add(actual);
     }
 
     // ---------- 文件夹映射（Folder Portal） ----------
@@ -516,8 +674,12 @@ public partial class App : Application
         var groups = DesktopTidyService.Scan(
             DesktopTidyService.DesktopDir(), new[] { Store.DataRoot, Store.ConfigDir });
 
-        var dlg = new TidyPreviewWindow(groups, Store, Config, EnsureBox);
-        dlg.ShowDialog();
+        var dlg = new TidyPreviewWindow(groups, Store, Config, EnsureBox, AddKeptIconObstacles);
+        // 只在这次对话期间启用「找空地」落位：普通新建盒子仍走原来的级联摆放，
+        // 不改变用户平时点「新建盒子」的手感
+        BeginTidyPlacement();
+        try { dlg.ShowDialog(); }
+        finally { EndTidyPlacement(); }
         if (!dlg.Applied) return;
 
         RefreshAfterTidy();
@@ -527,6 +689,10 @@ public partial class App : Application
         if (result.Skipped > 0) lines.Add($"{result.Skipped} 项因盒内已有同名条目跳过。");
         if (result.Failed > 0) lines.Add($"{result.Failed} 项移动失败，原文件仍在桌面。");
 
+        // 告诉用户"能撤回"比说"整理完了"更重要 —— 这是敢点这个按钮的前提
+        lines.Add("");
+        lines.Add("文件去向与桌面图标布局已记录，托盘菜单「一键恢复桌面」可还原。");
+
         var detail = result.Problems.Count > 0
             ? "\n\n" + string.Join("\n", result.Problems.Take(6)) +
               (result.Problems.Count > 6 ? $"\n…等 {result.Problems.Count} 条" : "")
@@ -535,6 +701,197 @@ public partial class App : Application
         MessageBox.Show(string.Join("\n", lines) + detail, "一键整理",
             MessageBoxButton.OK,
             result.Failed > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information);
+    }
+
+    // ---------- 一键恢复 ----------
+
+    /// <summary>
+    /// 托盘「一键恢复桌面…」：把上次整理搬走的文件放回原位，再还原图标布局。
+    ///
+    /// 只认**最近一次**整理的快照（<c>tidy-state.json</c>）。做多层历史栈意味着
+    /// "恢复"要选恢复到哪一次，而每次整理后桌面上又会有新东西 —— 那个心智模型比"撤回上一步"难懂得多。
+    /// </summary>
+    private void RestoreDesktop()
+    {
+        var state = TidyStateStore.TryLoad(Store.ConfigDir, out string loadError);
+        if (state == null)
+        {
+            MessageBox.Show(
+                loadError.Length > 0
+                    ? loadError + "\n\n如果整理记录已损坏，可以删除配置目录下的 tidy-state.json 后重新整理一次。"
+                    : "还没有整理记录。先用「一键整理桌面」整理一次，之后就能恢复到整理前的状态。",
+                "一键恢复", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (state.Items.Count == 0 && !state.LayoutCaptured)
+        {
+            MessageBox.Show("上一条整理记录里没有任何文件或布局信息，无法恢复。",
+                "一键恢复", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var plan = TidyRestoreService.BuildPlan(state, DesktopTidyService.DesktopDir());
+        var dlg = new TidyRestoreWindow(state, plan, Config);
+        dlg.ShowDialog();
+
+        if (!dlg.Applied) return;
+
+        // 先摘 Order、再删空盒子，最后才刷新窗口：反过来会把刚删的盒子又写回配置
+        ApplyRestoreBookkeeping(dlg);
+        var removedBoxes = RemoveEmptiedTidyBoxes(state, dlg.Result);
+        RefreshAfterTidy();
+
+        var lines = new List<string>();
+        if (dlg.Result is { } result)
+        {
+            lines.Add($"已把 {result.Restored} 项放回桌面。");
+            if (result.Skipped > 0) lines.Add($"{result.Skipped} 项因桌面已有同名条目跳过（原文件留在盒子里）。");
+            if (result.Failed > 0) lines.Add($"{result.Failed} 项无法恢复。");
+        }
+        else
+        {
+            lines.Add("已取消恢复。");
+        }
+
+        if (removedBoxes.Count > 0)
+        {
+            lines.Add(removedBoxes.Count == 1
+                ? $"已删除恢复后变空的盒子「{removedBoxes[0]}」。"
+                : $"已删除恢复后变空的 {removedBoxes.Count} 个盒子：{string.Join("、", removedBoxes)}。");
+        }
+
+        if (dlg.LayoutAttempted)
+        {
+            if (dlg.LayoutError.Length > 0)
+                lines.Add($"图标布局未还原：{dlg.LayoutError}");
+            else
+                lines.Add($"已按整理前的位置摆回 {dlg.LayoutApplied} 个图标"
+                    + (dlg.LayoutMissing > 0 ? $"，{dlg.LayoutMissing} 个图标在桌面上已不存在。" : "。"));
+        }
+        else if (state.LayoutCaptured)
+        {
+            lines.Add("本次没有需要还原的图标布局。");
+        }
+
+        var problems = dlg.Result?.Problems ?? Array.Empty<string>();
+        var detail = problems.Count > 0
+            ? "\n\n" + string.Join("\n", problems.Take(6)) +
+              (problems.Count > 6 ? $"\n…等 {problems.Count} 条" : "")
+            : "";
+
+        MessageBox.Show(string.Join("\n", lines) + detail, "一键恢复",
+            MessageBoxButton.OK,
+            (dlg.Result?.Failed > 0 || dlg.LayoutError.Length > 0)
+                ? MessageBoxImage.Warning : MessageBoxImage.Information);
+    }
+
+    /// <summary>
+    /// 恢复后的账目：把已经回桌面的文件名从盒子 <c>Order</c> 里摘掉并落盘。
+    /// 不做这一步，盒子里会留下指向已不存在文件的排序项，界面上的计数也会对不上。
+    /// </summary>
+    private void ApplyRestoreBookkeeping(TidyRestoreWindow dlg)
+    {
+        if (dlg.Result is not { RestoredItems.Count: > 0 } result) return;
+
+        bool changed = false;
+        foreach (var item in result.RestoredItems)
+        {
+            var box = Config.Boxes.FirstOrDefault(b =>
+                !ConfigStore.IsPortal(b) &&
+                string.Equals(b.Name, item.BoxName, StringComparison.OrdinalIgnoreCase));
+            if (box == null) continue;
+            if (box.Order.Remove(item.Name)) changed = true;
+        }
+
+        if (changed)
+        {
+            try { Store.Save(Config); }
+            catch (Exception ex) { Store.Log($"恢复后保存配置失败：{ex.Message}"); }
+        }
+    }
+
+    /// <summary>
+    /// 恢复完成后，把「本次整理建出来、现在已被搬空」的盒子一并收走。
+    ///
+    /// 判据刻意收窄：
+    /// - 只认快照里出现过的盒子名（本次恢复涉及的），用户自己建的空盒子不碰；
+    /// - 必须目录存在且里面真的一个条目都没有 —— 还有文件（比如恢复时因桌面同名被跳过）
+    ///   就说明盒子仍在使用，保留；
+    /// - 目录删不掉（被占用）不影响配置已移除，只记一条日志。
+    /// </summary>
+    private IReadOnlyList<string> RemoveEmptiedTidyBoxes(TidyState state, TidyRestoreResult? result)
+    {
+        if (result is not { RestoredItems.Count: > 0 }) return Array.Empty<string>();
+
+        var involved = state.Items
+            .Select(i => i.BoxName)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (involved.Count == 0) return Array.Empty<string>();
+
+        BoxConfig? FindBox(string name) => Config.Boxes.FirstOrDefault(b =>
+            !ConfigStore.IsPortal(b) &&
+            string.Equals(b.Name, name, StringComparison.OrdinalIgnoreCase));
+
+        string? DirOf(string name)
+        {
+            var box = FindBox(name);
+            return box == null ? null : Store.BoxDir(box);
+        }
+
+        var emptied = TidyBoxCleanupService.FindEmptiedBoxes(involved, DirOf);
+        if (emptied.Count == 0) return Array.Empty<string>();
+
+        var removed = new List<string>();
+        foreach (var name in emptied)
+        {
+            var box = FindBox(name);
+            if (box == null) continue;
+
+            var dir = Store.BoxDir(box);
+            var displayName = box.Name;
+
+            try { OnBoxDeleted(box); }   // 关窗口 + 从配置移除 + 落盘
+            catch (Exception ex)
+            {
+                Store.Log($"移除空盒子「{displayName}」失败：{ex.Message}");
+                continue;
+            }
+            removed.Add(displayName);
+
+            // 只有系统占位文件时也把目录收掉（IsEmpty 已把 desktop.ini / Thumbs.db 当空）
+            try
+            {
+                if (Directory.Exists(dir))
+                {
+                    foreach (var file in Directory.EnumerateFileSystemEntries(dir))
+                    {
+                        var fileName = Path.GetFileName(file);
+                        bool placeholder = fileName.Equals("desktop.ini", StringComparison.OrdinalIgnoreCase)
+                            || fileName.Equals("Thumbs.db", StringComparison.OrdinalIgnoreCase);
+                        if (!placeholder) continue;
+
+                        try
+                        {
+                            File.SetAttributes(file, FileAttributes.Normal);
+                            File.Delete(file);
+                        }
+                        catch { /* 删不掉就留着，下面的 Delete 会失败并记日志 */ }
+                    }
+
+                    if (!Directory.EnumerateFileSystemEntries(dir).Any())
+                        Directory.Delete(dir);
+                }
+            }
+            catch (Exception ex)
+            {
+                Store.Log($"删除空盒子目录失败（{dir}）：{ex.Message}");
+            }
+        }
+
+        return removed;
     }
 
     /// <summary>整理结束后刷新全部盒子的角标、缩略图与已打开的面板。</summary>
@@ -547,6 +904,8 @@ public partial class App : Application
     /// <summary>
     /// 一键整理的目标盒子：同名（非映射盒）直接复用，否则新建。
     /// 重复整理不会越堆越多 —— 第二次点「一键整理」还是落进那几个盒子。
+    ///
+    /// 复用的盒子**位置一个像素都不动**；只有本次新建的盒子会按桌面占用情况找空地。
     /// </summary>
     public BoxConfig EnsureBox(string name)
     {
@@ -559,10 +918,18 @@ public partial class App : Application
             Name = DesktopTidyService.UniqueBoxName(name, Config.Boxes.Select(b => b.Name)),
         };
         ApplyBoxDefaults(box);
-        PlaceNewBox(box);
+
+        bool tidying = _tidyObstacles != null;
+        BoxArea estimate = default;
+        if (tidying) estimate = PlaceTidyBox(box);
+        else PlaceNewBox(box);
+
         Config.Boxes.Add(box);
         Store.Save(Config);   // 先落盘：万一后续搬运中断，盒子结构不会丢
-        ShowBox(box);
+        var win = ShowBox(box);
+
+        // 自适应盒子要等窗口真正布局完才知道多宽，实测后可能还要微调一次
+        if (tidying) RefineTidyBoxPlacement(box, win, estimate);
         return box;
     }
 

@@ -133,6 +133,28 @@ public static class DesktopTidyService
         Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
 
     /// <summary>
+    /// 桌面图标（显示名）对应的条目是否在「本次要搬走」的清单里。
+    ///
+    /// 坑在于两套名字不是同一个东西：Explorer 默认隐藏已知扩展名，
+    /// ListView 里读到的是「报告」，而移动清单里是「报告.pdf」。
+    /// 只按字符串相等比较会漏掉一大半图标 —— 于是"以为搬走了"的图标其实还在，
+    /// 新盒子就正好压在上面。
+    /// </summary>
+    public static bool IconWillMove(string iconDisplayName, IEnumerable<string> movingFileNames)
+    {
+        if (string.IsNullOrEmpty(iconDisplayName)) return false;
+
+        foreach (var name in movingFileNames)
+        {
+            if (string.IsNullOrEmpty(name)) continue;
+            if (string.Equals(name, iconDisplayName, StringComparison.OrdinalIgnoreCase)) return true;
+            if (string.Equals(Path.GetFileNameWithoutExtension(name), iconDisplayName,
+                    StringComparison.OrdinalIgnoreCase)) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
     /// 扫桌面并分组。只读，不移动任何东西 —— 这一步本身就是"试运行"。
     /// </summary>
     /// <param name="desktopDir">桌面目录，测试时可指向临时目录。</param>

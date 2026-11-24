@@ -76,8 +76,9 @@ public partial class PanelWindow : Window
     private SortMode _sortMode = SortMode.None;
     private bool _searchOpen;
     private readonly PanelOpenMode _openMode;
-    // 被别的卡片压住时把表面调成全不透明；记一个状态位，避免每 200ms 重刷笔刷
+    // 被别的卡片压住时把表面调成全不透明；记一个状态位，避免每 120ms 重刷笔刷
     private bool _opaqueForOverlap;
+    private long _lastOverlapCheck;   // 拖动路径与定时器共用的节流时间戳
     private DispatcherTimer? _overlapTimer;
     private ContextMenu? _openMenu;
     private bool _suppressDeactivate;
@@ -109,6 +110,24 @@ public partial class PanelWindow : Window
     // 从面板内拖出文件期间，不要把面板自己的 DragOver 当成外部拖入
     private bool _internalDrag;
 
+    // ---------- 唤出 / 收起：仿 Windows 11 设置面板从任务栏展开的缩放动效 ----------
+    // 缩放从「触发点（盒子）那一角」长出来，所以 origin 不是固定的 0.5,0.5，
+    // 而是每次都按盒子相对面板的位置重算（见 ApplyScaleOrigin）。
+    private const double OpenScale = 0.90;    // 起始比例：再小就像"弹窗"，不像系统面板
+    private const double CloseScale = 0.90;   // 收起终点：与起始比例对称，看着是"退回触发点"
+    private const double IntroShift = 6;      // 起始位移：沿远离盒子的方向预置
+    private readonly ScaleTransform _scale = new(OpenScale, OpenScale);
+    private readonly TranslateTransform _shift = new();
+    private bool _animateOnClose;             // 只有 ClosePanel() 置位；Owner 销毁时直接关
+    private bool _closeDone;
+    private bool _closeAnimating;             // 收起动画已在跑，避免重复起动画
+    // 展开动画期间挂起"补图标"与"重叠检测"：
+    // 前者每到位一个图标就要重算一次阴影（位图缓存也会失效），后者会重建整套主题笔刷，
+    // 两者都会把动画帧挤掉 —— 卡顿主要来自这里，不是动画时长。
+    private readonly TaskCompletionSource<bool> _introGate = new();
+    private bool _introAnimating;
+    private DispatcherTimer? _closeGuard;
+
     public PanelWindow(BoxWindow owner, BoxConfig box, AppConfig config, ConfigStore store,
         PanelOpenMode mode = PanelOpenMode.Browse)
     {
@@ -125,7 +144,10 @@ public partial class PanelWindow : Window
         PanelTitle.Text = box.Name;
         ApplyTheme();
         Owner = owner;
-        RefreshItems();
+        // 首次绑定不做条目逐个淡入：此刻整个面板正在缩放展开，
+        // 两套动画叠在一起会互相削弱——系统面板是内容跟着容器一起放大，
+        // 不是"容器放大 + 条目自己再浮现一遍"。后续刷新列表（拖入/删除）仍然保留淡入。
+        RefreshItems(animate: false);
 
         // 显示前预量尺寸并定位，避免窗口先在默认位置闪现一下
         if (Content is FrameworkElement fe)
@@ -138,9 +160,14 @@ public partial class PanelWindow : Window
         // 首帧在窗口 Show 后立刻就被 DWM 合成到屏幕上，而 ContentRendered 是在
         // 「首帧已经画完」之后才触发的。原实现把「透明化 + 定位」都放在 ContentRendered 里，
         // 于是第一帧必然是「默认位置 + 完全不透明」，看起来就是先闪一下再归位。
-        // 因此这里在 Show 之前就把内容设为不可见、位移预置好。
+        // 因此这里在 Show 之前就把内容设为不可见、缩放与位移预置好。
+        //
+        // 顺序是 Scale → Translate：平移放在缩放之后，位移量就不会被缩放二次放大。
+        var group = new TransformGroup();
+        group.Children.Add(_scale);
+        group.Children.Add(_shift);
+        OuterGrid.RenderTransform = group;
         OuterGrid.Opacity = 0;
-        OuterGrid.RenderTransform = new TranslateTransform(12, -6);
         WindowStartupLocation = WindowStartupLocation.Manual;
 
         SourceInitialized += (_, _) =>
@@ -151,8 +178,16 @@ public partial class PanelWindow : Window
             if (HwndSource.FromHwnd(hwnd) is { CompositionTarget: { } target })
                 target.BackgroundColor = Colors.Transparent;
 
-            // HWND 已建、窗口尚未显示：此刻定位才是真正意义上的「一次到位」
+            // HWND 已建、窗口尚未显示：此刻定位才是真正意义上的「一次到位」。
+            // 位图缓存也在这里挂上 —— 若等 ContentRendered 再挂，首帧会先无缓存渲染一次、
+            // 挂上后又整树重渲染一次（还带一次 18px 模糊），等于开局白付一遍。
+            // 缓存挂在内容层而非 OuterGrid，所以此刻 opacity=0 不会被固化进缓存。
+            EnableRenderCache();
             UpdatePlacement();
+            // 位置已经定了：立刻判一次「是否被压住」。此后动画开始，判定要被挂起到收尾，
+            // 那一拍（展开 200ms + 定时器 120ms）正是用户说的"慢半拍"。
+            // 现在首帧就是实心的，根本看不到"由透变实"的过程。
+            UpdateOverlapOpacity(force: true);
         };
 
         if (_openMode == PanelOpenMode.Search)
@@ -170,9 +205,10 @@ public partial class PanelWindow : Window
         {
             // SizeToContent 下实际尺寸此时才定稿，再校一次位置（此时内容仍不可见）
             UpdatePlacement();
-            PlayOpenAnimation();
 
-            UpdateOverlapOpacity();
+            // 重叠判定交给动画收尾后的定时器：它可能要重建整套主题笔刷，
+            // 放在这里会让「点击 → 开始缩放」之间的等待变长，用户感受就是迟钝
+            PlayOpenAnimation();
 
             // 键盘焦点必须等首帧画完再抢：提前 Focus 会被窗口激活流程盖掉
             if (_openMode == PanelOpenMode.Search)
@@ -195,17 +231,27 @@ public partial class PanelWindow : Window
     /// </summary>
     private void StartOverlapWatch()
     {
-        _overlapTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher)
+        // 120ms：拖动/挪动期间要跟手，量几次矩形求交的成本可以忽略
+        _overlapTimer = new DispatcherTimer(DispatcherPriority.Normal, Dispatcher)
         {
-            Interval = TimeSpan.FromMilliseconds(200),
+            Interval = TimeSpan.FromMilliseconds(120),
         };
         _overlapTimer.Tick += (_, _) => UpdateOverlapOpacity();
         _overlapTimer.Start();
+        // 定时器的第一次 tick 要等一整个 interval：面板刚出来那 120ms 又是"慢半拍"。
+        // 先在本轮消息循环末尾补一次（首帧前 SourceInitialized 里还会 force 判一次）
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded,
+            new Action(() => UpdateOverlapOpacity()));
         Closed += (_, _) => _overlapTimer?.Stop();
     }
 
-    private void UpdateOverlapOpacity()
+    private void UpdateOverlapOpacity(bool force = false)
     {
+        // 展开动画在跑：此刻重建主题笔刷会抢走渲染帧，等动画收尾再恢复。
+        // force 只给「首帧之前」用 —— 那时还没有动画在跑，不存在抢帧。
+        if (_introAnimating && !force) return;
+        _lastOverlapCheck = Environment.TickCount64;
+
         bool overlap = OverlapsOtherWindow();
         if (overlap == _opaqueForOverlap) return;
         _opaqueForOverlap = overlap;
@@ -214,24 +260,38 @@ public partial class PanelWindow : Window
 
     private bool OverlapsOtherWindow()
     {
-        if (!IsLoaded || !IsVisible) return false;
-
-        // 外圈 18px 是留给投影的透明边，被它擦到不算"压住"
+        // 首帧之前也要能判：SourceInitialized 里定位完就判一次，这样面板「一出生就是
+        // 该有的实心程度」。等 ActualWidth 出来再判，就只能等动画收尾 + 定时器那一拍，
+        // 用户看到的是先透明地铺开、过半秒才变实心 —— 就是"重叠时反应慢半拍"。
+        // 此刻 ActualWidth 还是 0，用渲染前预量的设计尺寸顶上。
         const double margin = 18;
-        double w = ActualWidth - margin * 2;
-        double h = ActualHeight - margin * 2;
+        double w = (ActualWidth > 0 ? ActualWidth : _designSize.Width) - margin * 2;
+        double h = (ActualHeight > 0 ? ActualHeight : _designSize.Height) - margin * 2;
         if (w <= 0 || h <= 0) return false;
+        // Left/Top 在定位之前是 NaN（"交给系统决定"），拿去构造 Rect 没有意义
+        if (double.IsNaN(Left) || double.IsNaN(Top)) return false;
         var self = new Rect(Left + margin, Top + margin, w, h);
 
-        foreach (Window win in Application.Current.Windows)
+        // Application.Current 在某些宿主里可能不存在；拿不到就没有"别的窗口"可比
+        var app = Application.Current;
+        if (app == null) return false;
+
+        double area = w * h;
+        foreach (Window win in app.Windows)
         {
             if (ReferenceEquals(win, this) || !win.IsVisible) continue;
             if (win.WindowState == WindowState.Minimized) continue;
 
+            // 正在缩回的旧面板不算"压住"：快速切换盒子时新旧面板必然短暂叠在一起，
+            // 把它算进来会让新面板一出生就转成实心 —— 这就是"透明效果消失"的来源
+            if (win is PanelWindow { IsClosing: true }) continue;
+
             var other = new Rect(win.Left, win.Top, win.ActualWidth, win.ActualHeight);
             var hit = Rect.Intersect(self, other);
-            // 只压住几像素（圆角、阴影贴边）不该让面板突然变实
-            if (!hit.IsEmpty && hit.Width > 6 && hit.Height > 6) return true;
+            if (hit.IsEmpty) continue;
+            // 门槛按面积算而不是按边长：圆角、投影贴边只擦到几像素；
+            // 而"真的被盖住"至少不该低于整个面板的 15%，否则只是从边上路过
+            if (hit.Width * hit.Height >= area * 0.15) return true;
         }
         return false;
     }
@@ -247,6 +307,9 @@ public partial class PanelWindow : Window
         double r = _box.Rounded ? Math.Clamp(_box.CornerSize + 2, 10, 18) : 2;
         Root.CornerRadius = new CornerRadius(r);
         ShadowCaster.CornerRadius = new CornerRadius(r);
+
+        // 圆角变了，箭头能贴的范围也跟着变；构造期还没布局，跳过
+        if (IsLoaded) UpdatePlacement();
     }
 
     /// <summary>盒子设置改动后让已打开的面板跟随刷新（底色 / 圆角 / 前景对比色）。</summary>
@@ -256,12 +319,50 @@ public partial class PanelWindow : Window
     // WPF 在 Closing 期间再调 Close() 会抛 InvalidOperationException（会弹全局错误框）。
     private bool _closing;
 
+    /// <summary>正在播收起动画（窗口还没销毁）。重叠判定要跳过这种窗口。</summary>
+    internal bool IsClosing => _closing;
+
+    /// <summary>是否因为被别的卡片压住而转成了不透明（供验证工具断言）。</summary>
+    internal bool IsOpaqueForOverlap => _opaqueForOverlap;
+
     public void ClosePanel()
     {
         if (_closing) return;
         _closing = true;
+        // 用户主动收起（Esc / × / 失焦 / 再点盒子）才播缩回动画；
+        // Owner 销毁时走的是 Close()，那条路径不该为了动画拖慢退出
+        _animateOnClose = true;
+
+        // 以前是「先 Close() 再在 OnClosing 里 e.Cancel 掉」：那条路必须先跑完
+        // WPF 整套关闭流程（去激活、重新激活 Owner、一串窗口消息），才轮得到我们播动画。
+        // 展开时没有这段开销，于是同样的曲线，关闭就是比打开"迟半拍"。
+        // 现在动画直接开跑，窗口等动画放完再真的关。
+        if (_openAnimated && !_closeDone)
+        {
+            PlayCloseAnimation();
+            return;
+        }
         try { Close(); }
         catch (InvalidOperationException) { }
+    }
+
+    /// <summary>正在播收起动画（关闭请求已经受理，窗口还没销毁）。</summary>
+    internal bool IsCloseAnimating => _closeAnimating;
+
+    /// <summary>
+    /// 兜底：仍有人直接 <c>Close()</c>（Owner 销毁等）时，先取消一次把动画播完。
+    /// 正常路径已由 <see cref="ClosePanel"/> 自己起动画，走到这里时 <see cref="_closeAnimating"/>
+    /// 已置位，<see cref="PlayCloseAnimation"/> 是幂等的。
+    /// </summary>
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        if (_animateOnClose && !_closeDone && _openAnimated && !_closeAnimating)
+        {
+            e.Cancel = true;
+            PlayCloseAnimation();
+            return;
+        }
+        base.OnClosing(e);
     }
 
     // ---------- 打开动效 ----------
@@ -271,23 +372,256 @@ public partial class PanelWindow : Window
         if (_openAnimated) return;
         _openAnimated = true;
 
-        // 初始的「透明 + 位移」已在构造函数里预置好了（首帧就必须是不可见的），
-        // 这里只负责播放。若 RenderTransform 被意外替换，则兜底重建一次。
-        if (OuterGrid.RenderTransform is not TranslateTransform tt)
-        {
-            tt = new TranslateTransform(12, -6);
-            OuterGrid.RenderTransform = tt;
-            OuterGrid.Opacity = 0;
-        }
+        // 初始的「透明 + 缩放 + 位移」已在构造函数里预置好了（首帧就必须是不可见的），
+        // 这里只负责定锚点与播放。
+        ApplyScaleOrigin();
+        ComputeIntroOffset(out double dx, out double dy);
+        _scale.ScaleX = _scale.ScaleY = OpenScale;
+        _shift.X = dx;
+        _shift.Y = dy;
+        OuterGrid.Opacity = 0;
+
+        // 200ms / CubicEase：前段立刻起步（跟手），末段自己收住。
+        // 之前 280ms + Quadratic 偏"温和"，配合掉帧就显得又慢又顿。
+        _introAnimating = true;
+        _overlapTimer?.Stop();
+        ShadowCaster.Opacity = 1;   // 收起时置空过，重新打开必须恢复
+        EnableRenderCache();
 
         var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
-        var dur = TimeSpan.FromMilliseconds(220);
-        tt.BeginAnimation(TranslateTransform.XProperty,
-            new DoubleAnimation(12, 0, dur) { EasingFunction = ease });
-        tt.BeginAnimation(TranslateTransform.YProperty,
-            new DoubleAnimation(-6, 0, dur) { EasingFunction = ease });
+        var dur = TimeSpan.FromMilliseconds(200);
+
+        // 缩放和淡入同一时长、同时收尾：两条曲线错开会在结尾分出"第二段"，
+        // 观感就是先动一下再补一下，不连贯。
+        BeginScaled(dur, ease, OpenScale, 1, dx, 0, dy, 0);
         OuterGrid.BeginAnimation(UIElement.OpacityProperty,
-            new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(180)) { EasingFunction = ease });
+            new DoubleAnimation(0, 1, dur) { EasingFunction = ease });
+
+        // 动画走完立刻还回矢量渲染，静止时文字不能是缓存位图
+        ScheduleIntroEnd(dur + TimeSpan.FromMilliseconds(60));
+    }
+
+    /// <summary>缩放 + 位移一起动：两条曲线的时长与缓动必须一致，否则会看出"两段"。</summary>
+    private void BeginScaled(TimeSpan dur, IEasingFunction ease,
+        double fromScale, double toScale,
+        double fromX, double toX, double fromY, double toY)
+    {
+        _scale.BeginAnimation(ScaleTransform.ScaleXProperty,
+            new DoubleAnimation(fromScale, toScale, dur) { EasingFunction = ease });
+        _scale.BeginAnimation(ScaleTransform.ScaleYProperty,
+            new DoubleAnimation(fromScale, toScale, dur) { EasingFunction = ease });
+        _shift.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(fromX, toX, dur) { EasingFunction = ease });
+        _shift.BeginAnimation(TranslateTransform.YProperty,
+            new DoubleAnimation(fromY, toY, dur) { EasingFunction = ease });
+    }
+
+    /// <summary>
+    /// 动画期间把整棵子树缓存成一张位图。
+    ///
+    /// 为什么要这么做：面板是 <c>AllowsTransparency</c> 的分层窗口，而 WPF 的分层窗口
+    /// **强制软件渲染**（跟 <c>RenderCapability.Tier</c> 无关，本机实测 Tier=2 也一样）。
+    /// 直接对视觉树做缩放，等于每帧把圆角、文字、图标、投影重新 CPU 栅格化一遍 ——
+    /// 200ms 里掉几帧，看起来就是"顿"。缓存之后每帧只是对位图做变换，成本几乎为零。
+    ///
+    /// 建立缓存那一次仍旧要完整渲染（含 BlurRadius=18 的模糊），但首帧 opacity 还是 0，
+    /// 用户看不见那一下，所以不需要再单独摘投影。
+    ///
+    /// 缓存里图标会不会失效？用 <c>PrintWindow</c>（走 DWM 真实合成）验证过：图标、文字都正常。
+    /// 之前判成"图标变白块"是用 <c>RenderTargetBitmap</c> 抓的，它对带 <c>CacheMode</c> 的
+    /// 元素本来就渲染不出内容 —— 那是抓图工具的局限，不是显示问题。
+    /// </summary>
+    private void EnableRenderCache()
+    {
+        if (Root.CacheMode != null) return;
+        double dpi = 1;
+        try { dpi = VisualTreeHelper.GetDpi(this).DpiScaleX; } catch { }
+        var cache = new BitmapCache(Math.Max(1.0, dpi));   // RenderAtScale 取 DPI 比例，文字才不发虚
+
+        // 关键：缓存挂在**内容层与投影层**，不能挂在 OuterGrid 上 ——
+        // OuterGrid 身上跑着 opacity 动画，缓存位图会把当时（opacity=0）的合成结果固化下来，
+        // 之后淡入就再也看不见内容了。分开之后透明度在外层照常生效。
+        Root.CacheMode = cache;
+        ShadowCaster.CacheMode = cache;   // 投影也缓存：BlurRadius=18 只算这一次，不是每帧
+    }
+
+    /// <summary>动画结束必须撤掉：静止态走矢量渲染，缓存位图上的小字会略微发糊。</summary>
+    private void ReleaseRenderCache()
+    {
+        Root.CacheMode = null;
+        ShadowCaster.CacheMode = null;
+    }
+
+    /// <summary>
+    /// 按时间收尾（还投影 / 放行补图标 / 接回重叠检测）。
+    /// 不用动画的 Completed：动画被下一次调用替换时它不会回来，漏掉就一直等着。
+    /// </summary>
+    private void ScheduleIntroEnd(TimeSpan after)
+    {
+        var timer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = after };
+        timer.Tick += (_, _) =>
+        {
+            timer.Stop();
+            // 动画收尾。缓存**故意不撤**：拽着窗口移动、关闭时的收缩都能直接复用它，
+            // 撤掉再建等于把那次带模糊的全量重绘又付一遍（用户感受就是"动画末尾卡一下"）。
+            // RenderAtScale 取的是 DPI 比例，静止态位图与屏幕像素 1:1，清晰度没有可察觉的损失。
+            _introAnimating = false;
+            _introGate.TrySetResult(true);
+            // 动画一收尾立刻校正一次：等下一个 tick 还要多付一个 interval
+            UpdateOverlapOpacity();
+            _overlapTimer?.Start();
+        };
+        timer.Start();
+    }
+
+    private void PlayCloseAnimation()
+    {
+        if (_closeAnimating) return;
+        _closeAnimating = true;
+
+        // 收起期间别让残留的透明区域接住点击
+        OuterGrid.IsHitTestVisible = false;
+
+        // 投影层比内容大一圈（BlurRadius 18 + 外扩），每帧都要整块重采样。
+        // 缩到 0.9 时阴影本来就几乎不可辨，收起期间省掉这一层能明显稳住首帧。
+        // 注意用 Opacity 而不是 Visibility：Collapsed 会让 Grid 重新测量，
+        // SizeToContent 的窗口会在动画第一帧跳一下尺寸。
+        ShadowCaster.Opacity = 0;
+        _overlapTimer?.Stop();   // 收缩过程中不需要再判定重叠，否则会重建主题笔刷抢帧
+        EnableRenderCache();
+
+        // 收起必须"从第一帧起就一直在变"，而且每一帧的变化量要均匀。
+        // 两个极端都不行：EaseIn 前 60% 几乎不褪 → "点了没反应，然后突然没了"；
+        // CubicEaseOut 前 20% 就走完 80% → "闪一下就没了"。
+        // 实测帧间隔就是 10-16ms，150ms 只有 9 帧左右，曲线一陡就只剩 2-3 个可见台阶。
+        // 所以：淡出用**线性**（每帧均匀掉一格），缩放仍用 EaseOut（末段自然收住）。
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        // 150ms：展开 200ms 的 3/4，收的动作读起来更快；太短会显得"闪一下"
+        var dur = TimeSpan.FromMilliseconds(150);
+
+        // 只动缩放，不再起位移：打开结束时 _shift 已经停在 0，再补一条 0→0 的动画
+        // 等于每帧多算两层变换矩阵，还让 WPF 认为有新的变换需要重组 —— 白付的开销。
+        // （快速连点导致 _shift 还没归位时，它自己的动画会继续跑完，位移照样自然收住。）
+        _scale.BeginAnimation(ScaleTransform.ScaleXProperty,
+            new DoubleAnimation(_scale.ScaleX, CloseScale, dur) { EasingFunction = ease });
+        _scale.BeginAnimation(ScaleTransform.ScaleYProperty,
+            new DoubleAnimation(_scale.ScaleY, CloseScale, dur) { EasingFunction = ease });
+
+        var fadeAnim = new DoubleAnimation(OuterGrid.Opacity, 0, dur);
+        // 动画一结束就立刻收尾：不要只靠定时器。
+        // DispatcherTimer 的精度与排队都不可控，动画明明停了窗口还挂在合成里，
+        // 那几十毫秒正是"缩完了、桌面才反应过来"的那一下顿。
+        // 收尾排到 Background：Completed 在动画时钟 tick 里触发，此刻最后一帧可能还没提交。
+        // 同步 Hide 会让面板停在"还差一点透明度"的画面上硬切，观感就是最后一下顿住。
+        // Background 排在该帧渲染之后，相当于"先把 0 的那一帧显示出来，再摘窗口"。
+        fadeAnim.Completed += (_, _) =>
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(FinalizeClose));
+        OuterGrid.BeginAnimation(UIElement.OpacityProperty, fadeAnim);
+
+        // 兜底仍旧保留（Completed 在极端情况下可能不来），但优先级提到 Normal：
+        // Background 是最后一级，主线程一忙它就一直往后排，窗口会以全透明状态蹭着 DWM
+        _closeGuard = new DispatcherTimer(DispatcherPriority.Normal, Dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(200),
+        };
+        _closeGuard.Tick += (_, _) => FinalizeClose();
+        _closeGuard.Start();
+    }
+
+    /// <summary>
+    /// 收起收尾时的实测数据，供 <c>--closeprof</c> 回归使用。
+    /// 把"动画本身掉帧"和"Hide/Close 的同步开销"分开量化，才知道该优化哪一段。
+    /// </summary>
+    internal double ProfOpacityAtHide { get; private set; } = -1;
+    internal double ProfHideMs { get; private set; } = -1;
+    internal double ProfCloseMs { get; private set; } = -1;
+    internal DateTime ProfFinalizeAt { get; private set; }
+    /// <summary>当前画面状态（透明度 / 缩放），供逐帧采样。</summary>
+    internal double ProfOpacity => OuterGrid.Opacity;
+    internal double ProfScale => _scale.ScaleX;
+
+    private void FinalizeClose()
+    {
+        if (_closeDone) return;
+        _closeDone = true;
+        _closeGuard?.Stop();
+        _introGate.TrySetResult(true);
+
+        ProfFinalizeAt = DateTime.UtcNow;
+        ProfOpacityAtHide = OuterGrid.Opacity;
+
+        // 先 Hide 再从合成里摘掉。Close() 不是免费的：销毁 HwndSource、释放图标位图、
+        // 把激活交还 Owner，这些是几十毫秒的同步开销。紧接在缩放动画后面，用户看到的就是
+        // "缩完 → 顿一下 → 才消失"。Hide 只是一次 ShowWindow(SW_HIDE)，立刻生效；
+        // 真正的销毁推到下一轮 Normal 优先级的空闲里，那一下已经看不见任何变化了。
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try { Hide(); }
+        catch (InvalidOperationException) { }
+        ProfHideMs = sw.Elapsed.TotalMilliseconds;
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(() =>
+        {
+            var closeSw = System.Diagnostics.Stopwatch.StartNew();
+            try { Close(); }
+            catch (InvalidOperationException) { }
+            ProfCloseMs = closeSw.Elapsed.TotalMilliseconds;
+        }));
+    }
+
+    /// <summary>
+    /// 缩放锚点 = 盒子中心在面板里的相对位置。
+    /// 面板默认开在盒子右侧，此时盒子中心落在面板左边界之外 → 横向夹到 0（从左边缘长出来），
+    /// 纵向夹到盒子中心的高度 → 视觉上就是"从盒子那个位置向四周撑开"。
+    /// </summary>
+    private void ApplyScaleOrigin()
+    {
+        double w = ActualWidth > 0 ? ActualWidth : _designSize.Width;
+        double h = ActualHeight > 0 ? ActualHeight : _designSize.Height;
+        if (w <= 0 || h <= 0 || !_owner.IsLoaded)
+        {
+            OuterGrid.RenderTransformOrigin = new Point(0.5, 0.5);
+            return;
+        }
+
+        // OuterGrid 外面还套了 18px 的投影留白，窗口坐标换成内容坐标要扣掉
+        const double M = 18;
+        double cx = _owner.Left + _owner.ActualWidth / 2 - Left - M;
+        double cy = _owner.Top + _owner.ActualHeight / 2 - Top - M;
+        double iw = Math.Max(1, w - M * 2);
+        double ih = Math.Max(1, h - M * 2);
+
+        OuterGrid.RenderTransformOrigin = new Point(
+            Math.Clamp(cx / iw, 0, 1),
+            Math.Clamp(cy / ih, 0, 1));
+    }
+
+    /// <summary>起始位移：沿「远离盒子」的方向预置几像素，展开时像是从盒子那侧推出来。</summary>
+    private void ComputeIntroOffset(out double dx, out double dy)
+    {
+        dx = 0;
+        dy = 0;
+        if (!_owner.IsLoaded) { dx = -IntroShift; return; }
+
+        const double M = 18;
+        double w = ActualWidth > 0 ? ActualWidth : _designSize.Width;
+        double h = ActualHeight > 0 ? ActualHeight : _designSize.Height;
+        double boxL = _owner.Left, boxT = _owner.Top;
+        double boxR = boxL + _owner.ActualWidth, boxB = boxT + _owner.ActualHeight;
+
+        // 用**可见边**判定，不能直接比 Left/Top：它俩含 18px 投影留白，
+        // 而面板可见边到盒子只有 15px（ArrowLen + ArrowGap），差这 3px 会判反。
+        bool atRight = Left + M >= boxR - 1;
+        bool atLeft = Left + w - M <= boxL + 1;
+        bool atBelow = Top + M >= boxB - 1;
+        bool atAbove = Top + h - M <= boxT + 1;
+
+        if (atRight) dx = -IntroShift;
+        else if (atLeft) dx = IntroShift;
+        if (atBelow) dy = -IntroShift;
+        else if (atAbove) dy = IntroShift;
+        // 对角避让时两个轴都会赋值，位移自然变成斜向 —— 展开像从盒子那个角撑开
+        // 与盒子重叠（极端窄屏）时给个默认方向，避免"原地放大"缺少方向感
+        if (dx == 0 && dy == 0) dx = -IntroShift;
     }
 
     private void AnimateItems()
@@ -395,6 +729,38 @@ public partial class PanelWindow : Window
 
     private Size _designSize;
 
+    // 气泡箭头朝哪边：指向盒子。面板在上 → 朝下；在下 → 朝上；在左 → 朝右；在右 → 朝左
+    private enum PointerSide { Down, Up, Left, Right }
+
+    /// <summary>面板相对盒子的横向摆放：左侧 / 居中 / 右侧。</summary>
+    private enum AxisX { Left, Center, Right }
+
+    /// <summary>面板相对盒子的纵向摆放：上方 / 居中 / 下方。</summary>
+    private enum AxisY { Above, Center, Below }
+
+    private static AxisX Flip(AxisX v) =>
+        v == AxisX.Right ? AxisX.Left : v == AxisX.Left ? AxisX.Right : AxisX.Center;
+
+    private static AxisY Flip(AxisY v) =>
+        v == AxisY.Below ? AxisY.Above : v == AxisY.Above ? AxisY.Below : AxisY.Center;
+
+    /// <summary>「盒子靠近边缘就朝反方向让开」的判定阈值（占工作区的比例）。</summary>
+    private const double EdgeZone = 0.34;
+
+    /// <summary>
+    /// 定位规则：气泡式避让。
+    ///
+    /// 横向三档 × 纵向三档，拼出三类位置：
+    /// - **侧放**（一个轴居中）：水平方向居中、纵向居中、只剩一侧时贴在盒子左/右并垂直居中；
+    /// - **上下放**（另一轴居中）：水平居中贴在盒子上/下；
+    /// - **对角避让**（两个轴都不居中）：四个角正好落在这里 —— 盒子在左上，面板就去右下，
+    ///   即面板的左上角贴住盒子的右下角，其余三角同理。
+    ///
+    /// 方位先按「盒子中心在工作区里的相对位置」定：靠左 → 面板放右，靠右 → 放左，
+    /// 靠上 → 放下，靠下 → 放上；正中保持原来「优先上方」的习惯。
+    /// 首选方向装不下时按候选序列退让（先丢一个轴的偏置变成侧放，再换到另一侧），
+    /// 全都装不下才挑余量最大的一侧硬放 —— 那时宁可压住盒子一角，也不能让面板出屏。
+    /// </summary>
     private void UpdatePlacement()
     {
         // SizeToContent 在 Loaded 时可能还未量出尺寸：用渲染前预量的尺寸兜底
@@ -407,29 +773,243 @@ public partial class PanelWindow : Window
         double dpi = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         double waL = wa.X / dpi, waT = wa.Y / dpi;
         double waR = wa.Right / dpi, waB = wa.Bottom / dpi;
-        const double M = 18; // 窗口外圈投影边距
 
-        // 水平：默认盒子右侧，越界翻到左侧
-        double x = _owner.Left + _owner.ActualWidth;
-        if (x + w - M > waR)
-            x = _owner.Left - w + M;
+        const double M = 18;        // 窗口外圈投影留白
+        const double ArrowLen = 12;
+        const double ArrowGap = 3;  // 箭头尖到盒子的缝隙
+        const double Seam = ArrowLen + ArrowGap;   // 可见边到盒子的距离
+
+        double boxL = _owner.Left, boxT = _owner.Top;
+        double boxR = boxL + _owner.ActualWidth, boxB = boxT + _owner.ActualHeight;
+        double boxCx = (boxL + boxR) / 2;
+        double boxCy = (boxT + boxB) / 2;
+
+        // 可见面板（去掉投影留白）的尺寸
+        double visW = Math.Max(1, w - M * 2);
+        double visH = Math.Max(1, h - M * 2);
+        double needX = visW + Seam;
+        double needY = visH + Seam;
+
+        double roomLeft = boxL - waL, roomRight = waR - boxR;
+        double roomAbove = boxT - waT, roomBelow = waB - boxB;
+
+        // 1) 盒子在工作区里的相对位置 → 直觉方位
+        double relX = (boxCx - waL) / Math.Max(1, waR - waL);
+        double relY = (boxCy - waT) / Math.Max(1, waB - waT);
+
+        AxisX prefX = relX <= EdgeZone ? AxisX.Right
+                    : relX >= 1 - EdgeZone ? AxisX.Left
+                    : AxisX.Center;
+        AxisY prefY = relY <= EdgeZone ? AxisY.Below
+                    : relY >= 1 - EdgeZone ? AxisY.Above
+                    : AxisY.Center;
+        // 正中央：保持「优先上方」的老习惯（盒子贴任务栏是最常见的场景）
+        if (prefX == AxisX.Center && prefY == AxisY.Center) prefY = AxisY.Above;
+
+        bool FitX(AxisX v) => v switch
+        {
+            AxisX.Right => roomRight >= needX,
+            AxisX.Left => roomLeft >= needX,
+            _ => true,      // 居中不额外占空间（纵向已经避开盒子）
+        };
+        bool FitY(AxisY v) => v switch
+        {
+            AxisY.Below => roomBelow >= needY,
+            AxisY.Above => roomAbove >= needY,
+            _ => true,
+        };
+
+        // 2) 候选序列：首选 → 退成侧放/上下放 → 换到另一侧
+        var candidates = new (AxisX X, AxisY Y)[]
+        {
+            (prefX, prefY),
+            (prefX, AxisY.Center),
+            (AxisX.Center, prefY),
+            (Flip(prefX), prefY),
+            (Flip(prefX), AxisY.Center),
+            (AxisX.Center, Flip(prefY)),
+            (AxisX.Center, AxisY.Above),
+            (AxisX.Center, AxisY.Below),
+        };
+
+        AxisX px = AxisX.Center;
+        AxisY py = AxisY.Above;
+        bool placed = false;
+        foreach (var (cx, cy) in candidates)
+        {
+            if (cx == AxisX.Center && cy == AxisY.Center) continue;  // 完全重叠，无意义
+            if (!FitX(cx) || !FitY(cy)) continue;
+            (px, py) = (cx, cy);
+            placed = true;
+            break;
+        }
+        if (!placed)
+        {
+            // 两边都比面板窄：挑余量最大的一侧硬放，宁可压住盒子一角也不出屏
+            double hMax = Math.Max(roomLeft, roomRight);
+            double vMax = Math.Max(roomAbove, roomBelow);
+            if (hMax >= vMax)
+            {
+                px = roomRight >= roomLeft ? AxisX.Right : AxisX.Left;
+                py = AxisY.Center;
+            }
+            else
+            {
+                px = AxisX.Center;
+                py = roomAbove >= roomBelow ? AxisY.Above : AxisY.Below;
+            }
+        }
+
+        // 3) 落位。除了方位，还有一条硬约束：**箭头必须真的指得到盒子** ——
+        //    上下箭头要求面板横向覆盖盒子中心，左右箭头要求纵向覆盖。
+        //    没有这条约束时，盒子在角落会被对角避让推到横向错开很远的位置，
+        //    箭头只能夹在面板边角上，指向一片空白（"不知道这个箭头在指什么"）。
+        //    做法：先按方位算理想位置，再夹进「能对准」的区间，最后夹进工作区。
+        //    这一步就是在需要时**平移面板**去配合箭头，指向关系优先于避让的观感。
+        double r = Root.CornerRadius.TopLeft;
+        double pad = r + 11 + 4;   // 箭头半宽 11 + 离圆角的余量，保证箭头落在直边上
+
+        double x = px switch
+        {
+            AxisX.Right => boxR + Seam - M,                 // 可见左边贴在盒子右边 15px 外
+            AxisX.Left => boxL - Seam - visW - M,           // 可见右边贴在盒子左边 15px 外
+            _ => boxCx - visW / 2 - M,                      // 水平居中于盒子
+        };
+        double y = py switch
+        {
+            AxisY.Below => boxB + Seam - M,
+            AxisY.Above => boxT - Seam - visH - M,
+            _ => boxCy - visH / 2 - M,                      // 垂直居中于盒子
+        };
+
+        // 约束只作用在**箭头实际挂的那条轴**上：
+        // 上下箭头（py != Center）要横向覆盖盒子中心，此时纵向必须保持"在上方/下方"，
+        // 绝不能再为了对准去动 y —— 那会把面板拖到和盒子重叠的位置上。
+        if (py != AxisY.Center)
+        {
+            double lo = boxCx - M - visW + pad;
+            double hi = boxCx - M - pad;
+            x = lo <= hi ? Math.Clamp(x, lo, hi) : hi;
+        }
+        else if (px != AxisX.Center)
+        {
+            double lo = boxCy - M - visH + pad;
+            double hi = boxCy - M - pad;
+            y = lo <= hi ? Math.Clamp(y, lo, hi) : hi;
+        }
+
         x = ClampSafe(x, waL - M, waR - w + M);
-
-        // 垂直：默认与盒子顶对齐；下方放不下则弹到盒子上方
-        double y = _owner.Top;
-        if (y + h - M > waB)
-            y = _owner.Top - h + M - 6;
-        y = ClampSafe(y, waT - M, waB - h);
+        y = ClampSafe(y, waT - M, waB - h + M);
 
         Left = x;
         Top = y;
+
+        // 工作区实在放不下时锚点会被夹住：与其画一个指错方向的箭头，不如不画
+        double anchorX = boxCx - (x + M);
+        double anchorY = boxCy - (y + M);
+        bool tight = py != AxisY.Center
+            ? (anchorX < pad - 0.5 || anchorX > visW - pad + 0.5)
+            : (px != AxisX.Center && (anchorY < pad - 0.5 || anchorY > visH - pad + 0.5));
+
+        // 4) 箭头：挂在朝向盒子的那条边上。
+        //   纵向有偏置时（上下放）挂上下边；只有纯侧放才挂左右边。
+        PointerSide side = py != AxisY.Center
+            ? (py == AxisY.Above ? PointerSide.Down : PointerSide.Up)
+            : (px == AxisX.Right ? PointerSide.Left : PointerSide.Right);
+
+        UpdatePointer(side, tight, x + M, y + M, visW, visH, boxCx, boxCy);
+    }
+
+    /// <summary>
+    /// 把箭头摆到「盒子中心正对的那条边」上，并夹在圆角内侧 ——
+    /// 盒子被拖到屏幕边缘、面板被迫横移时，箭头仍然指着盒子而不是面板正中。
+    /// </summary>
+    private void UpdatePointer(PointerSide side, bool hidden,
+        double contentLeft, double contentTop, double visW, double visH,
+        double boxCx, double boxCy)
+    {
+        if (hidden || visH < 60 || visW < 80)
+        {
+            PointerFill.Visibility = Visibility.Collapsed;
+            PointerEdge.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        const double half = 11;  // 箭头半宽
+        const double len = 12;   // 箭头长
+        double r = Root.CornerRadius.TopLeft;
+        // 圆角 + 箭头半宽 + 余量：箭头必须整条落在直边上，压到弧线就像面板破了口。
+        // 这个值和 UpdatePlacement 里的 pad 必须一致，否则"能对准"的判定会和实际画出来的位置对不上
+        double pad = r + half + 4;
+
+        if (side is PointerSide.Down or PointerSide.Up)
+        {
+            double ax = Math.Clamp(boxCx - contentLeft, pad, Math.Max(pad, visW - pad));
+            if (side == PointerSide.Down)
+            {
+                PointerFill.Data = Geometry.Parse("M 0,0 L 22,0 L 11,12 Z");
+                PointerEdge.Data = Geometry.Parse("M 0,0 L 11,12 M 22,0 L 11,12");
+                // 抬高 1px 让填充盖住面板自己的 1px 描边，接缝处才不会出现一条横线
+                Canvas.SetLeft(PointerFill, ax - half);
+                Canvas.SetTop(PointerFill, visH - 1);
+                Canvas.SetLeft(PointerEdge, ax - half);
+                Canvas.SetTop(PointerEdge, visH - 1);
+            }
+            else
+            {
+                PointerFill.Data = Geometry.Parse("M 0,12 L 22,12 L 11,0 Z");
+                PointerEdge.Data = Geometry.Parse("M 0,12 L 11,0 M 22,12 L 11,0");
+                Canvas.SetLeft(PointerFill, ax - half);
+                Canvas.SetTop(PointerFill, -len + 1);
+                Canvas.SetLeft(PointerEdge, ax - half);
+                Canvas.SetTop(PointerEdge, -len + 1);
+            }
+        }
+        else
+        {
+            // 侧放：箭头挂在左/右边，纵向对准盒子中心（盒子是横长条时也能指准）
+            double ay = Math.Clamp(boxCy - contentTop, pad, Math.Max(pad, visH - pad));
+            if (side == PointerSide.Right)
+            {
+                // 面板在盒子左侧，箭头从右边伸出去朝右
+                PointerFill.Data = Geometry.Parse("M 0,0 L 12,11 L 0,22 Z");
+                PointerEdge.Data = Geometry.Parse("M 0,0 L 12,11 M 0,22 L 12,11");
+                Canvas.SetLeft(PointerFill, visW - 1);
+                Canvas.SetTop(PointerFill, ay - half);
+                Canvas.SetLeft(PointerEdge, visW - 1);
+                Canvas.SetTop(PointerEdge, ay - half);
+            }
+            else
+            {
+                // 面板在盒子右侧，箭头从左边伸出去朝左
+                PointerFill.Data = Geometry.Parse("M 12,0 L 0,11 L 12,22 Z");
+                PointerEdge.Data = Geometry.Parse("M 12,0 L 0,11 M 12,22 L 0,11");
+                Canvas.SetLeft(PointerFill, -len + 1);
+                Canvas.SetTop(PointerFill, ay - half);
+                Canvas.SetLeft(PointerEdge, -len + 1);
+                Canvas.SetTop(PointerEdge, ay - half);
+            }
+        }
+
+        PointerFill.Visibility = Visibility.Visible;
+        PointerEdge.Visibility = Visibility.Visible;
     }
 
     // 面板比工作区还宽/高时 min>max 会让 Math.Clamp 抛异常，这里退化为贴左/贴上
     private static double ClampSafe(double v, double min, double max) =>
         min > max ? min : Math.Clamp(v, min, max);
 
-    public void FollowOwner() => UpdatePlacement();
+    public void FollowOwner()
+    {
+        UpdatePlacement();
+
+        // 盒子被拖动时面板跟着走，随时可能撞上别的卡片。定时器那 120ms 在这条路径上
+        // 明显跟不上（拖动是 16ms 粒度的），这里按 80ms 节流复判：
+        // 状态没变就只做几次 Rect 求交，变了才重建笔刷
+        long now = Environment.TickCount64;
+        if (now - _lastOverlapCheck < 80) return;
+        UpdateOverlapOpacity();
+    }
 
     public void RefreshItems(bool animate = true)
     {
@@ -528,13 +1108,28 @@ public partial class PanelWindow : Window
 
     private async Task LoadIconsAsync(List<PanelItem> items)
     {
+        // 已缓存过的图标在 RefreshItems 里同步填好了；这里补的是没命中的那些。
+        // 等展开动画走完再补 —— 动画期间每补一个都要重绘一次，正是掉帧的来源。
+        try { await _introGate.Task; } catch { }
+
+        // 先全部取完再统一赋值：每个 item.Icon 赋值都会让位图缓存失效，
+        // 逐个"取一个赋一个"等于重建 N 次（每次都要重算投影模糊），大目录会明显卡。
+        var loaded = new List<(PanelItem Item, ImageSource Icon)>();
         foreach (var item in items)
         {
-            ImageSource? icon;
-            try { icon = await IconService.GetAsync(item.FilePath); }
-            catch { continue; }
-            if (icon != null) item.Icon = icon;
+            try
+            {
+                var icon = await IconService.GetAsync(item.FilePath);
+                if (icon != null) loaded.Add((item, icon));
+            }
+            catch { }
         }
+        if (loaded.Count == 0) return;
+
+        Root.CacheMode = null;
+        ShadowCaster.CacheMode = null;
+        foreach (var (item, icon) in loaded) item.Icon = icon;
+        EnableRenderCache();
     }
 
     // ---------- 搜索 ----------

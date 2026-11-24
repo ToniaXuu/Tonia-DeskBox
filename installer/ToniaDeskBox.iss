@@ -14,9 +14,9 @@
 
 #define AppName        "Tonia-DeskBox"
 ; 版本号默认值与 csproj 的 <Version> 保持一致；
-; CI 或命令行可用 ISCC /DAppVersion=0.3.0 覆盖，避免手改多处。
+; CI 或命令行可用 ISCC /DAppVersion=0.3.1 覆盖，避免手改多处。
 #ifndef AppVersion
-  #define AppVersion   "0.3.0"
+  #define AppVersion   "0.3.1"
 #endif
 #define AppPublisher   "Tonia"
 #define AppExeName     "ToniaDeskBox.exe"

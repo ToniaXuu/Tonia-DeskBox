@@ -78,6 +78,23 @@
                                Foreground="{DynamicResource Theme.TextMuted}"
                                Text="预览本身就是试运行：这里只列清单，点「开始整理」之前不会移动任何文件。"/>
 
+                    <!-- 恢复能力说明区：布局元数据总是记录，备份是可选项 -->
+                    <Border Background="{DynamicResource Theme.Fill}" CornerRadius="8"
+                            BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1"
+                            Padding="12,10" Margin="0,12,0,0">
+                        <StackPanel>
+                            <CheckBox x:Name="BackupCheck" Style="{StaticResource ModernCheck}"
+                                      IsChecked="True" Content="整理前先备份这些文件"
+                                      Checked="OnBackupToggled" Unchecked="OnBackupToggled"/>
+                            <TextBlock x:Name="BackupHint" Margin="24,5,0,0" FontSize="11"
+                                       TextWrapping="Wrap"
+                                       Foreground="{DynamicResource Theme.TextMuted}"/>
+                            <TextBlock x:Name="LayoutHint" Margin="24,6,0,0" FontSize="11"
+                                       TextWrapping="Wrap"
+                                       Foreground="{DynamicResource Theme.TextSecondary}"/>
+                        </StackPanel>
+                    </Border>
+
                     <Border Background="{DynamicResource Theme.Fill}" CornerRadius="8"
                             BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1"
                             Padding="10,8" Margin="0,12,0,0">
